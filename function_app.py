@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import azure.functions as func
@@ -62,6 +62,18 @@ def _parse_iso_datetime(value: Any, field_name: str) -> str:
     return value
 
 
+def _parse_local_date(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ApiError(400, f"{field_name} is required")
+
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ApiError(400, f"{field_name} must use YYYY-MM-DD format") from exc
+
+    return value
+
+
 def _validate_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ApiError(400, "Request body must be a JSON object")
@@ -70,14 +82,7 @@ def _validate_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(person_id, str) or not person_id.strip():
         raise ApiError(400, "personId is required")
 
-    local_date = payload.get("localDate")
-    if not isinstance(local_date, str) or not local_date:
-        raise ApiError(400, "localDate is required")
-
-    try:
-        datetime.strptime(local_date, "%Y-%m-%d")
-    except ValueError as exc:
-        raise ApiError(400, "localDate must use YYYY-MM-DD format") from exc
+    _parse_local_date(payload.get("localDate"), "localDate")
 
     export_type = payload.get("exportType")
     if export_type not in {"complete-day", "today-so-far"}:
@@ -131,33 +136,107 @@ def _build_document(payload: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-@app.route(route="health-export", methods=["POST"])
+def _date_range(start_date: str, end_date: str) -> list[str]:
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    if end < start:
+        raise ApiError(400, "endDate must be on or after startDate")
+
+    days = (end - start).days
+    if days > 370:
+        raise ApiError(400, "Date range must be 370 days or fewer")
+
+    return [(start + timedelta(days=offset)).isoformat() for offset in range(days + 1)]
+
+
+def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
+    action = req.params.get("action")
+    if action != "missing-dates":
+        raise ApiError(400, "Unsupported action")
+
+    person_id = req.params.get("personId", "").strip()
+    if not person_id:
+        raise ApiError(400, "personId is required")
+
+    start_date = _parse_local_date(req.params.get("startDate"), "startDate")
+    end_date = _parse_local_date(req.params.get("endDate"), "endDate")
+    requested_dates = _date_range(start_date, end_date)
+
+    query = """
+        SELECT c.localDate
+        FROM c
+        WHERE c.userID = @userID
+          AND c.exportType = @exportType
+          AND c.localDate >= @startDate
+          AND c.localDate <= @endDate
+    """
+    parameters = [
+        {"name": "@userID", "value": person_id},
+        {"name": "@exportType", "value": "complete-day"},
+        {"name": "@startDate", "value": start_date},
+        {"name": "@endDate", "value": end_date},
+    ]
+
+    container = _get_container()
+    existing_dates = {
+        item["localDate"]
+        for item in container.query_items(
+            query=query,
+            parameters=parameters,
+            partition_key=person_id,
+        )
+        if isinstance(item.get("localDate"), str)
+    }
+    missing_dates = [date for date in requested_dates if date not in existing_dates]
+
+    logging.info(
+        "Checked missing health export dates personId=%s startDate=%s endDate=%s missing=%d",
+        person_id,
+        start_date,
+        end_date,
+        len(missing_dates),
+    )
+
+    return _json_response({"missingDates": missing_dates})
+
+
+def _store_health_export(req: func.HttpRequest) -> func.HttpResponse:
+    payload = _validate_payload(req.get_json())
+    document = _build_document(payload)
+
+    container = _get_container()
+    result = container.upsert_item(document)
+
+    logging.info(
+        "Stored health export personId=%s localDate=%s exportType=%s",
+        document["personId"],
+        document["localDate"],
+        document["exportType"],
+    )
+
+    return _json_response(
+        {
+            "ok": True,
+            "id": result["id"],
+            "personId": result["personId"],
+            "localDate": result["localDate"],
+            "exportType": result["exportType"],
+        },
+        status_code=200,
+    )
+
+
+@app.route(route="health-export", methods=["GET", "POST"])
 def health_export(req: func.HttpRequest) -> func.HttpResponse:
     try:
         _check_bearer_token(req)
-        payload = _validate_payload(req.get_json())
-        document = _build_document(payload)
+        if req.method == "GET":
+            return _get_missing_dates(req)
+        if req.method == "POST":
+            return _store_health_export(req)
 
-        container = _get_container()
-        result = container.upsert_item(document)
-
-        logging.info(
-            "Stored health export personId=%s localDate=%s exportType=%s",
-            document["personId"],
-            document["localDate"],
-            document["exportType"],
-        )
-
-        return _json_response(
-            {
-                "ok": True,
-                "id": result["id"],
-                "personId": result["personId"],
-                "localDate": result["localDate"],
-                "exportType": result["exportType"],
-            },
-            status_code=200,
-        )
+        return _json_response({"ok": False, "error": "Method not allowed"}, status_code=405)
     except ValueError:
         return _json_response({"ok": False, "error": "Invalid JSON body"}, status_code=400)
     except ApiError as exc:
