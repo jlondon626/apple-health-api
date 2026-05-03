@@ -124,6 +124,7 @@ def _build_document(payload: dict[str, Any]) -> dict[str, Any]:
 
     document = dict(payload)
     document["personId"] = person_id
+    document["userID"] = person_id
     document["id"] = f"{person_id}:{local_date}:{export_type}"
     document["receivedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
