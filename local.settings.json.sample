@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "COSMOS_ENDPOINT": "https://<account-name>.documents.azure.com:443/",
+    "COSMOS_KEY": "<cosmos-account-key>",
+    "COSMOS_DATABASE": "health",
+    "COSMOS_CONTAINER": "exports",
+    "HEALTH_API_TOKEN": ""
+  }
+}
