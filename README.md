@@ -347,7 +347,7 @@ Published leaderboard history can be requested with or without a `kind` query:
 
 `GET /api/challenges/{challenge_id}/leaderboards`
 
-This returns previous `week`, `month`, and `final` leaderboard documents. The API supports both legacy `type: "leaderboard"` docs and scoring-job docs using `type: "leaderboard_week"`, `type: "leaderboard_month"`, or `type: "leaderboard_final"`. If a linked `leaderboard_ai_message` document exists, the response includes it as `message` plus `aiMessageId`.
+This returns previous `week`, `month`, and `final` leaderboard documents. The API supports both legacy `type: "leaderboard"` docs and scoring-job docs using `type: "leaderboard_week"`, `type: "leaderboard_month"`, or `type: "leaderboard_final"`. A leaderboard is only returned to the app when a linked `leaderboard_ai_message` document exists; the response includes that AI text as `message` plus `aiMessageId`. If no matching AI message exists, the leaderboard is treated as unavailable and omitted.
 
 ```json
 {

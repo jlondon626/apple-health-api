@@ -476,6 +476,19 @@ def test_latest_leaderboard_read(fake_container):
             "rows": [{"userID": "Ash", "score": 10}],
         }
     )
+    fake_container.upsert_item(
+        {
+            "id": "leaderboard_new_message",
+            "type": "leaderboard_ai_message",
+            "challengeID": "challenge_2026_05_04",
+            "leaderboardId": "leaderboard_new",
+            "leaderboardKind": "week",
+            "status": "generated",
+            "channel": "app",
+            "message": "Latest week summary",
+            "generatedAt": "2026-05-18T00:00:00Z",
+        }
+    )
 
     response = app.latest_leaderboard(
         request(
@@ -551,6 +564,24 @@ def test_leaderboard_history_returns_week_month_and_final(fake_container):
         },
     ]:
         fake_container.upsert_item(item)
+    for item in [
+        ("lb_week_1_message", "lb_week_1", "week", "2026-05-11T00:05:00Z"),
+        ("lb_month_2026_05_message", "lb_month_2026_05", "month", "2026-06-01T00:05:00Z"),
+        ("lb_final_message", "lb_final", "final", "2026-06-02T00:05:00Z"),
+    ]:
+        fake_container.upsert_item(
+            {
+                "id": item[0],
+                "type": "leaderboard_ai_message",
+                "challengeID": "challenge_2026_05_04",
+                "leaderboardId": item[1],
+                "leaderboardKind": item[2],
+                "status": "generated",
+                "channel": "app",
+                "message": f"{item[2]} summary",
+                "generatedAt": item[3],
+            }
+        )
 
     response = app.list_leaderboards(
         request(
@@ -630,6 +661,47 @@ def test_published_typed_leaderboard_is_enriched_with_ai_message(fake_container)
     latest = response_json(latest_response)
     assert latest["id"] == "challenge_2026_05_04__2026-05-10__leaderboard_week"
     assert latest["message"] == leaderboards[0]["message"]
+
+
+def test_leaderboard_without_ai_message_is_not_returned(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04__2026-05-10__leaderboard_month",
+            "type": "leaderboard_month",
+            "challengeID": "challenge_2026_05_04",
+            "leaderboardKind": "month",
+            "periodStartDate": "2026-05-01",
+            "periodEndDate": "2026-05-31",
+            "status": "published",
+            "rows": [{"rank": 1, "userID": "Jack", "score": 123}],
+        }
+    )
+
+    history_response = app.list_leaderboards(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards",
+            params={"kind": "month"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+    latest_response = app.latest_leaderboard(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards/latest",
+            params={"kind": "month"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert history_response.status_code == 200
+    assert response_json(history_response) == {"leaderboards": []}
+
+    assert latest_response.status_code == 200
+    latest = response_json(latest_response)
+    assert latest["leaderboardID"] == "empty_challenge_2026_05_04_month"
+    assert latest["rows"] == []
+    assert "message" not in latest
 
 
 def test_leaderboard_messages_endpoint_and_single_lookups(fake_container):

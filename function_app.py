@@ -1338,10 +1338,11 @@ def _attach_leaderboard_messages(
         message = by_message_id.get(leaderboard.get("aiMessageId")) or by_leaderboard_id.get(
             leaderboard.get("id")
         ) or by_leaderboard_id.get(leaderboard.get("leaderboardID"))
-        if message:
-            leaderboard["aiMessageId"] = message["id"]
-            leaderboard["message"] = message.get("message", "")
-            leaderboard["aiMessage"] = message
+        if not message:
+            continue
+        leaderboard["aiMessageId"] = message["id"]
+        leaderboard["message"] = message.get("message", "")
+        leaderboard["aiMessage"] = message
         enriched.append(leaderboard)
     return enriched
 
