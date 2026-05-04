@@ -50,18 +50,6 @@ def _get_container():
     return _container
 
 
-def _parse_iso_datetime(value: Any, field_name: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ApiError(400, f"{field_name} must be a non-empty ISO-8601 string")
-
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ApiError(400, f"{field_name} must be a valid ISO-8601 datetime") from exc
-
-    return value
-
-
 def _parse_local_date(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ApiError(400, f"{field_name} is required")
@@ -74,37 +62,46 @@ def _parse_local_date(value: Any, field_name: str) -> str:
     return value
 
 
-def _validate_payload(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ApiError(400, "Request body must be a JSON object")
+def _parse_number(value: Any, field_name: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ApiError(400, f"{field_name} must be a number")
 
-    person_id = payload.get("personId")
-    if not isinstance(person_id, str) or not person_id.strip():
-        raise ApiError(400, "personId is required")
+    if value < 0:
+        raise ApiError(400, f"{field_name} must be 0 or greater")
 
-    _parse_local_date(payload.get("localDate"), "localDate")
+    return value
 
-    export_type = payload.get("exportType")
-    if export_type not in {"complete-day", "today-so-far"}:
-        raise ApiError(400, "exportType must be complete-day or today-so-far")
 
-    window = payload.get("window")
-    if not isinstance(window, dict):
-        raise ApiError(400, "window is required")
+def _validate_row(row: Any, index: int) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        raise ApiError(400, f"Row {index} must be a JSON object")
 
-    _parse_iso_datetime(window.get("start"), "window.start")
-    _parse_iso_datetime(window.get("end"), "window.end")
-    _parse_iso_datetime(payload.get("exportedAt"), "exportedAt")
+    user_id = row.get("user_id")
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ApiError(400, f"Row {index} user_id is required")
 
-    metrics = payload.get("metrics")
-    if metrics is not None and not isinstance(metrics, dict):
-        raise ApiError(400, "metrics must be an object")
+    return {
+        "user_id": user_id.strip(),
+        "date": _parse_local_date(row.get("date"), f"Row {index} date"),
+        "active_energy_kcal": _parse_number(
+            row.get("active_energy_kcal"), f"Row {index} active_energy_kcal"
+        ),
+        "exercise_minutes": _parse_number(
+            row.get("exercise_minutes"), f"Row {index} exercise_minutes"
+        ),
+        "stand_hours": _parse_number(row.get("stand_hours"), f"Row {index} stand_hours"),
+    }
 
-    totals = payload.get("totals")
-    if totals is not None and not isinstance(totals, dict):
-        raise ApiError(400, "totals must be an object")
 
-    return payload
+def _validate_rows(payload: Any) -> list[dict[str, Any]]:
+    rows = payload if isinstance(payload, list) else [payload]
+    if not rows:
+        raise ApiError(400, "Request body must contain at least one row")
+
+    if len(rows) > 31:
+        raise ApiError(400, "Batch must contain 31 rows or fewer")
+
+    return [_validate_row(row, index) for index, row in enumerate(rows)]
 
 
 def _check_bearer_token(req: func.HttpRequest) -> None:
@@ -122,15 +119,13 @@ def _check_bearer_token(req: func.HttpRequest) -> None:
         raise ApiError(403, "Invalid bearer token")
 
 
-def _build_document(payload: dict[str, Any]) -> dict[str, Any]:
-    person_id = payload["personId"].strip()
-    local_date = payload["localDate"]
-    export_type = payload["exportType"]
+def _build_document(row: dict[str, Any]) -> dict[str, Any]:
+    user_id = row["user_id"]
+    local_date = row["date"]
 
-    document = dict(payload)
-    document["personId"] = person_id
-    document["userID"] = person_id
-    document["id"] = f"{person_id}:{local_date}:{export_type}"
+    document = dict(row)
+    document["userID"] = user_id
+    document["id"] = f"{user_id}:{local_date}"
     document["receivedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     return document
@@ -155,44 +150,42 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
     if action != "missing-dates":
         raise ApiError(400, "Unsupported action")
 
-    person_id = req.params.get("personId", "").strip()
-    if not person_id:
-        raise ApiError(400, "personId is required")
+    user_id = req.params.get("user_id", "").strip()
+    if not user_id:
+        raise ApiError(400, "user_id is required")
 
     start_date = _parse_local_date(req.params.get("startDate"), "startDate")
     end_date = _parse_local_date(req.params.get("endDate"), "endDate")
     requested_dates = _date_range(start_date, end_date)
 
     query = """
-        SELECT c.localDate
+        SELECT c.date
         FROM c
         WHERE c.userID = @userID
-          AND c.exportType = @exportType
-          AND c.localDate >= @startDate
-          AND c.localDate <= @endDate
+          AND c.date >= @startDate
+          AND c.date <= @endDate
     """
     parameters = [
-        {"name": "@userID", "value": person_id},
-        {"name": "@exportType", "value": "complete-day"},
+        {"name": "@userID", "value": user_id},
         {"name": "@startDate", "value": start_date},
         {"name": "@endDate", "value": end_date},
     ]
 
     container = _get_container()
     existing_dates = {
-        item["localDate"]
+        item["date"]
         for item in container.query_items(
             query=query,
             parameters=parameters,
-            partition_key=person_id,
+            partition_key=user_id,
         )
-        if isinstance(item.get("localDate"), str)
+        if isinstance(item.get("date"), str)
     }
     missing_dates = [date for date in requested_dates if date not in existing_dates]
 
     logging.info(
-        "Checked missing health export dates personId=%s startDate=%s endDate=%s missing=%d",
-        person_id,
+        "Checked missing health export dates user_id=%s startDate=%s endDate=%s missing=%d",
+        user_id,
         start_date,
         end_date,
         len(missing_dates),
@@ -202,26 +195,23 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
 
 
 def _store_health_export(req: func.HttpRequest) -> func.HttpResponse:
-    payload = _validate_payload(req.get_json())
-    document = _build_document(payload)
+    rows = _validate_rows(req.get_json())
 
     container = _get_container()
-    result = container.upsert_item(document)
+    documents = [_build_document(row) for row in rows]
+    results = [container.upsert_item(document) for document in documents]
 
     logging.info(
-        "Stored health export personId=%s localDate=%s exportType=%s",
-        document["personId"],
-        document["localDate"],
-        document["exportType"],
+        "Stored health export rows=%d users=%s",
+        len(results),
+        sorted({document["user_id"] for document in documents}),
     )
 
     return _json_response(
         {
             "ok": True,
-            "id": result["id"],
-            "personId": result["personId"],
-            "localDate": result["localDate"],
-            "exportType": result["exportType"],
+            "count": len(results),
+            "ids": [result["id"] for result in results],
         },
         status_code=200,
     )
