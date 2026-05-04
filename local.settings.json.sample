@@ -7,6 +7,7 @@
     "COSMOS_KEY": "<cosmos-account-key>",
     "COSMOS_DATABASE": "health",
     "COSMOS_CONTAINER": "exports",
+    "COSMOS_COMPETITION_CONTAINER": "fitness_competitions",
     "HEALTH_API_TOKEN": ""
   }
 }
