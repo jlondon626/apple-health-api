@@ -121,6 +121,9 @@ def test_create_and_patch_user(fake_container):
     assert created["id"] == "user_jack"
     assert created["userID"] == "Jack"
     assert created["averageDailyCalorieTarget"] == 2400
+    assert created["syncSources"]["renpho"] == {"enabled": True, "credentialRef": "jack"}
+    assert created["syncSources"]["fatsecret"] == {"enabled": True, "credentialRef": "jack"}
+    assert created["syncSources"]["appleHealth"] == {"enabled": True}
     assert "weeklyCalorieTarget" not in created
     assert "_etag" not in created
 

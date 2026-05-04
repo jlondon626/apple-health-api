@@ -161,6 +161,8 @@ The competition API uses the same bearer token as the health export endpoint. Do
 
 Creates or upserts a user document with deterministic `id`, for example `user_jack`.
 
+If `syncSources` is omitted when creating a user, the API enables Renpho and FatSecret by default and sets each `credentialRef` to the normalised lowercase `userID`, for example `Jack` becomes `jack`. Apple Health is also enabled by default.
+
 `syncSources` stores safe metadata only. The API rejects fields that look like passwords, tokens, API keys, client secrets, access secrets, connection strings, or Function App setting names. `credentialRef` must be a short safe identifier such as `jack` or `ash`; it is not a secret. If `renpho.enabled` or `fatsecret.enabled` is `true`, that source must include `credentialRef`.
 
 Other user endpoints:

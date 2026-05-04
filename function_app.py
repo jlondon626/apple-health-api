@@ -114,6 +114,10 @@ def _user_doc_id(user_id: str) -> str:
     return f"user_{_normalise_id(user_id)}"
 
 
+def _credential_ref_from_user_id(user_id: str) -> str:
+    return _normalise_id(user_id)
+
+
 def _participant_doc_id(challenge_id: str, user_id: str) -> str:
     return f"{challenge_id}__{user_id.strip()}"
 
@@ -415,7 +419,7 @@ class UserCreate(BaseModel):
     goalWeightKg: float | None = None
     averageDailyCalorieTarget: float | None = None
     active: bool = True
-    syncSources: SyncSources = Field(default_factory=SyncSources)
+    syncSources: SyncSources | None = None
 
     @field_validator("userID", "displayName", "timezone")
     @classmethod
@@ -639,6 +643,15 @@ def _create_or_update_user(payload: UserCreate) -> dict[str, Any]:
     now = _utc_now()
     existing = _get_user_document(payload.userID)
     body = _model_payload(payload)
+    if body.get("syncSources") is None:
+        credential_ref = _credential_ref_from_user_id(payload.userID)
+        body["syncSources"] = _model_payload(
+            SyncSources(
+                renpho=SourceCredentialMetadata(enabled=True, credentialRef=credential_ref),
+                fatsecret=SourceCredentialMetadata(enabled=True, credentialRef=credential_ref),
+                appleHealth=AppleHealthSourceMetadata(enabled=True),
+            )
+        )
     user = {
         **(existing or {}),
         **body,
