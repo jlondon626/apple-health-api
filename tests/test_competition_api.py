@@ -111,7 +111,7 @@ def test_create_and_patch_user(fake_container):
                 "displayName": "Jack",
                 "timezone": "Europe/London",
                 "goalWeightKg": 87,
-                "weeklyCalorieTarget": 16800,
+                "averageDailyCalorieTarget": 2400,
             },
         )
     )
@@ -120,13 +120,15 @@ def test_create_and_patch_user(fake_container):
     created = response_json(create_response)
     assert created["id"] == "user_jack"
     assert created["userID"] == "Jack"
+    assert created["averageDailyCalorieTarget"] == 2400
+    assert "weeklyCalorieTarget" not in created
     assert "_etag" not in created
 
     patch_response = app.patch_user(
         request(
             "PATCH",
             "/api/users/Jack",
-            {"goalWeightKg": 85.5},
+            {"goalWeightKg": 85.5, "averageDailyCalorieTarget": 2300},
             route_params={"user_id": "Jack"},
         )
     )
@@ -134,6 +136,7 @@ def test_create_and_patch_user(fake_container):
     assert patch_response.status_code == 200
     patched = response_json(patch_response)
     assert patched["goalWeightKg"] == 85.5
+    assert patched["averageDailyCalorieTarget"] == 2300
     assert patched["createdAt"] == created["createdAt"]
     assert patched["updatedAt"] >= created["updatedAt"]
 
@@ -147,7 +150,7 @@ def test_create_user_with_sync_sources(fake_container):
                 "userID": "Ash",
                 "displayName": "Ash",
                 "goalWeightKg": 90,
-                "weeklyCalorieTarget": 16000,
+                "averageDailyCalorieTarget": 2300,
                 "syncSources": {
                     "renpho": {"enabled": False, "credentialRef": "ash"},
                     "fatsecret": {"enabled": False, "credentialRef": "ash"},
@@ -161,6 +164,30 @@ def test_create_user_with_sync_sources(fake_container):
     created = response_json(response)
     assert created["syncSources"]["renpho"] == {"enabled": False, "credentialRef": "ash"}
     assert created["syncSources"]["appleHealth"] == {"enabled": True}
+
+
+def test_legacy_weekly_calorie_target_is_exposed_as_daily(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "user_jack",
+            "type": "user",
+            "userID": "Jack",
+            "displayName": "Jack",
+            "timezone": "Europe/London",
+            "goalWeightKg": 87,
+            "weeklyCalorieTarget": 16800,
+            "active": True,
+        }
+    )
+
+    response = app.get_user(
+        request("GET", "/api/users/Jack", route_params={"user_id": "Jack"})
+    )
+
+    assert response.status_code == 200
+    user = response_json(response)
+    assert user["averageDailyCalorieTarget"] == 2400
+    assert "weeklyCalorieTarget" not in user
 
 
 def test_sync_sources_patch_requires_credential_ref_when_enabled(fake_container):
@@ -214,7 +241,7 @@ def test_secret_like_user_fields_are_rejected(fake_container):
                 "userID": "Jack",
                 "displayName": "Jack",
                 "goalWeightKg": 87,
-                "weeklyCalorieTarget": 16800,
+                "averageDailyCalorieTarget": 2400,
                 "renphoPassword": "do-not-store",
             },
         )
@@ -233,7 +260,7 @@ def test_secret_like_credential_ref_is_rejected(fake_container):
                 "userID": "Jack",
                 "displayName": "Jack",
                 "goalWeightKg": 87,
-                "weeklyCalorieTarget": 16800,
+                "averageDailyCalorieTarget": 2400,
                 "syncSources": {
                     "renpho": {"enabled": True, "credentialRef": "azure_renpho_token"},
                 },

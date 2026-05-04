@@ -122,6 +122,14 @@ def _strip_cosmos_fields(document: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in document.items() if key not in COSMOS_SYSTEM_FIELDS}
 
 
+def _strip_user_document(document: dict[str, Any]) -> dict[str, Any]:
+    user = _strip_cosmos_fields(document)
+    if "averageDailyCalorieTarget" not in user and user.get("weeklyCalorieTarget") is not None:
+        user["averageDailyCalorieTarget"] = user["weeklyCalorieTarget"] / 7
+    user.pop("weeklyCalorieTarget", None)
+    return user
+
+
 def _model_payload(model: BaseModel, exclude_unset: bool = False) -> dict[str, Any]:
     return model.model_dump(exclude_unset=exclude_unset)
 
@@ -405,7 +413,7 @@ class UserCreate(BaseModel):
     displayName: str | None = None
     timezone: str = "Europe/London"
     goalWeightKg: float | None = None
-    weeklyCalorieTarget: float | None = None
+    averageDailyCalorieTarget: float | None = None
     active: bool = True
     syncSources: SyncSources = Field(default_factory=SyncSources)
 
@@ -414,7 +422,7 @@ class UserCreate(BaseModel):
     def _strip_text(cls, value: str | None) -> str | None:
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("goalWeightKg", "weeklyCalorieTarget")
+    @field_validator("goalWeightKg", "averageDailyCalorieTarget")
     @classmethod
     def _positive_number(cls, value: float | None) -> float | None:
         if value is not None and value <= 0:
@@ -428,7 +436,7 @@ class UserPatch(BaseModel):
     displayName: str | None = None
     timezone: str | None = None
     goalWeightKg: float | None = None
-    weeklyCalorieTarget: float | None = None
+    averageDailyCalorieTarget: float | None = None
     active: bool | None = None
     syncSources: SyncSources | None = None
 
@@ -437,7 +445,7 @@ class UserPatch(BaseModel):
     def _strip_optional_text(cls, value: str | None) -> str | None:
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("goalWeightKg", "weeklyCalorieTarget")
+    @field_validator("goalWeightKg", "averageDailyCalorieTarget")
     @classmethod
     def _positive_optional_number(cls, value: float | None) -> float | None:
         if value is not None and value <= 0:
@@ -615,7 +623,7 @@ def _enrich_challenge(document: dict[str, Any]) -> dict[str, Any]:
         "SELECT * FROM c WHERE c.type = @type AND ARRAY_CONTAINS(@userIDs, c.userID)",
         [{"name": "@type", "value": "user"}, {"name": "@userIDs", "value": user_ids}],
     )
-    by_user = {profile["userID"]: _strip_cosmos_fields(profile) for profile in profiles}
+    by_user = {profile["userID"]: _strip_user_document(profile) for profile in profiles}
     challenge["participantProfiles"] = [
         by_user[user_id] for user_id in user_ids if user_id in by_user
     ]
@@ -641,7 +649,8 @@ def _create_or_update_user(payload: UserCreate) -> dict[str, Any]:
         "createdAt": (existing or {}).get("createdAt", now),
         "updatedAt": now,
     }
-    return _strip_cosmos_fields(_get_competition_container().upsert_item(user))
+    user.pop("weeklyCalorieTarget", None)
+    return _strip_user_document(_get_competition_container().upsert_item(user))
 
 
 def _merge_sync_sources(existing: dict[str, Any], patch: SyncSourcesPatch) -> dict[str, Any]:
@@ -707,7 +716,7 @@ def list_users(req: func.HttpRequest) -> func.HttpResponse:
                 {"name": "@type", "value": "user"},
                 {"name": "@active", "value": active.lower() == "true"},
             ]
-        return _json_response({"users": [_strip_cosmos_fields(item) for item in _query_items(query, parameters)]})
+        return _json_response({"users": [_strip_user_document(item) for item in _query_items(query, parameters)]})
     except Exception as exc:
         return _handle_competition_error(exc)
 
@@ -719,7 +728,7 @@ def get_user(req: func.HttpRequest) -> func.HttpResponse:
         user = _get_user_document(_route_param(req, "user_id"))
         if not user:
             raise ApiError(404, "User not found")
-        return _json_response(_strip_cosmos_fields(user))
+        return _json_response(_strip_user_document(user))
     except Exception as exc:
         return _handle_competition_error(exc)
 
@@ -738,7 +747,8 @@ def patch_user(req: func.HttpRequest) -> func.HttpResponse:
             **_model_payload(patch, exclude_unset=True),
             "updatedAt": _utc_now(),
         }
-        return _json_response(_strip_cosmos_fields(_get_competition_container().upsert_item(updated)))
+        updated.pop("weeklyCalorieTarget", None)
+        return _json_response(_strip_user_document(_get_competition_container().upsert_item(updated)))
     except Exception as exc:
         return _handle_competition_error(exc)
 
@@ -757,7 +767,7 @@ def patch_user_sync_sources(req: func.HttpRequest) -> func.HttpResponse:
             "syncSources": _merge_sync_sources(existing, patch),
             "updatedAt": _utc_now(),
         }
-        return _json_response(_strip_cosmos_fields(_get_competition_container().upsert_item(updated)))
+        return _json_response(_strip_user_document(_get_competition_container().upsert_item(updated)))
     except Exception as exc:
         return _handle_competition_error(exc)
 
@@ -770,8 +780,9 @@ def user_profile_check(req: func.HttpRequest) -> func.HttpResponse:
         user = _get_user_document(user_id)
         if not user:
             raise ApiError(404, "User not found")
-        required = ["goalWeightKg", "weeklyCalorieTarget", "timezone"]
-        missing = [field for field in required if user.get(field) in (None, "")]
+        normalised_user = _strip_user_document(user)
+        required = ["goalWeightKg", "averageDailyCalorieTarget", "timezone"]
+        missing = [field for field in required if normalised_user.get(field) in (None, "")]
         return _json_response({"userID": user_id, "ready": not missing, "missingFields": missing})
     except Exception as exc:
         return _handle_competition_error(exc)
@@ -788,7 +799,7 @@ def app_bootstrap(req: func.HttpRequest) -> func.HttpResponse:
         challenge = _current_or_upcoming_challenge()
         return _json_response(
             {
-                "user": _strip_cosmos_fields(user) if user else None,
+                "user": _strip_user_document(user) if user else None,
                 "challenge": _enrich_challenge(challenge) if challenge else None,
             }
         )

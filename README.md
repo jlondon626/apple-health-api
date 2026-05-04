@@ -141,7 +141,7 @@ The competition API uses the same bearer token as the health export endpoint. Do
   "displayName": "Jack",
   "timezone": "Europe/London",
   "goalWeightKg": 87,
-  "weeklyCalorieTarget": 16800,
+  "averageDailyCalorieTarget": 2400,
   "active": true,
   "syncSources": {
     "renpho": {
