@@ -20,14 +20,28 @@ class FakeCompetitionContainer:
 
         if "@type" in params:
             rows = [row for row in rows if row.get("type") == params["@type"]]
+        if "@id" in params:
+            rows = [row for row in rows if row.get("id") == params["@id"]]
         if "@userID" in params:
             rows = [row for row in rows if row.get("userID") == params["@userID"]]
         if "@challengeID" in params:
-            rows = [row for row in rows if row.get("challengeID") == params["@challengeID"]]
+            rows = [
+                row
+                for row in rows
+                if row.get("challengeID") == params["@challengeID"]
+                or row.get("challengeId") == params["@challengeID"]
+            ]
         if "@status" in params:
             rows = [row for row in rows if row.get("status") == params["@status"]]
         if "@kind" in params:
-            rows = [row for row in rows if row.get("kind") == params["@kind"]]
+            rows = [
+                row
+                for row in rows
+                if row.get("kind") == params["@kind"]
+                or row.get("leaderboardKind") == params["@kind"]
+            ]
+        if "@leaderboardId" in params:
+            rows = [row for row in rows if row.get("leaderboardId") == params["@leaderboardId"]]
         if "@userIDs" in params:
             rows = [row for row in rows if row.get("userID") in params["@userIDs"]]
         if "@startDate" in params:
@@ -550,6 +564,180 @@ def test_leaderboard_history_returns_week_month_and_final(fake_container):
     leaderboards = response_json(response)["leaderboards"]
     assert {item["kind"] for item in leaderboards} == {"week", "month", "final"}
     assert all("leaderboardID" in item for item in leaderboards)
+
+
+def test_published_typed_leaderboard_is_enriched_with_ai_message(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+            "type": "leaderboard_week",
+            "challengeID": "challenge_2026_05_04",
+            "challengeId": "challenge_2026_05_04",
+            "leaderboardKind": "week",
+            "periodStartDate": "2026-05-10",
+            "periodEndDate": "2026-05-16",
+            "status": "published",
+            "rankings": [{"rank": 1, "userID": "Jack", "score": 123}],
+        }
+    )
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message",
+            "type": "leaderboard_ai_message",
+            "challengeID": "challenge_2026_05_04",
+            "challengeId": "challenge_2026_05_04",
+            "leaderboardId": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+            "leaderboardType": "leaderboard_week",
+            "leaderboardKind": "week",
+            "periodStartDate": "2026-05-10",
+            "periodEndDate": "2026-05-16",
+            "status": "generated",
+            "channel": "app",
+            "message": "Competition leaderboard feedback\nJack leads the week.",
+            "generatedAt": "2026-05-04T20:16:13Z",
+            "version": 1,
+        }
+    )
+
+    history_response = app.list_leaderboards(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards",
+            params={"kind": "week"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+    latest_response = app.latest_leaderboard(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards/latest",
+            params={"kind": "week"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert history_response.status_code == 200
+    leaderboards = response_json(history_response)["leaderboards"]
+    assert len(leaderboards) == 1
+    assert leaderboards[0]["id"] == "challenge_2026_05_04__2026-05-10__leaderboard_week"
+    assert leaderboards[0]["leaderboardKind"] == "week"
+    assert leaderboards[0]["rankings"] == [{"rank": 1, "userID": "Jack", "score": 123}]
+    assert leaderboards[0]["rows"] == []
+    assert leaderboards[0]["aiMessageId"] == "challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message"
+    assert "Jack leads" in leaderboards[0]["message"]
+
+    assert latest_response.status_code == 200
+    latest = response_json(latest_response)
+    assert latest["id"] == "challenge_2026_05_04__2026-05-10__leaderboard_week"
+    assert latest["message"] == leaderboards[0]["message"]
+
+
+def test_leaderboard_messages_endpoint_and_single_lookups(fake_container):
+    message_doc = {
+        "id": "challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message",
+        "type": "leaderboard_ai_message",
+        "challengeID": "challenge_2026_05_04",
+        "leaderboardId": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+        "leaderboardType": "leaderboard_week",
+        "leaderboardKind": "week",
+        "periodStartDate": "2026-05-10",
+        "periodEndDate": "2026-05-16",
+        "status": "generated",
+        "channel": "app",
+        "message": "Competition leaderboard feedback",
+        "generatedAt": "2026-05-04T20:16:13Z",
+        "_etag": "strip-me",
+    }
+    fake_container.upsert_item(message_doc)
+
+    list_response = app.list_leaderboard_messages(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboard-messages",
+            params={"kind": "week"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+    by_id_response = app.get_leaderboard_message(
+        request(
+            "GET",
+            "/api/leaderboard-messages/challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message",
+            route_params={
+                "ai_message_id": "challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message"
+            },
+        )
+    )
+    by_leaderboard_response = app.get_leaderboard_message_for_leaderboard(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards/challenge_2026_05_04__2026-05-10__leaderboard_week/message",
+            route_params={
+                "challenge_id": "challenge_2026_05_04",
+                "leaderboard_id": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+            },
+        )
+    )
+
+    assert list_response.status_code == 200
+    messages = response_json(list_response)["messages"]
+    assert len(messages) == 1
+    assert messages[0]["id"] == message_doc["id"]
+    assert "_etag" not in messages[0]
+
+    assert by_id_response.status_code == 200
+    assert response_json(by_id_response)["message"] == "Competition leaderboard feedback"
+
+    assert by_leaderboard_response.status_code == 200
+    assert response_json(by_leaderboard_response)["id"] == message_doc["id"]
+
+
+def test_latest_leaderboard_uses_message_when_no_leaderboard_doc_exists(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "message_only",
+            "type": "leaderboard_ai_message",
+            "challengeID": "challenge_2026_05_04",
+            "leaderboardId": "missing_leaderboard_doc",
+            "leaderboardType": "leaderboard_week",
+            "leaderboardKind": "week",
+            "periodStartDate": "2026-05-10",
+            "periodEndDate": "2026-05-16",
+            "status": "generated",
+            "channel": "app",
+            "message": "Message-only leaderboard feedback",
+            "generatedAt": "2026-05-04T20:16:13Z",
+        }
+    )
+
+    response = app.latest_leaderboard(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards/latest",
+            params={"kind": "week"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert body["leaderboardID"] == "missing_leaderboard_doc"
+    assert body["aiMessageId"] == "message_only"
+    assert body["message"] == "Message-only leaderboard feedback"
+    assert body["rows"] == []
+
+
+def test_leaderboard_messages_returns_empty_list_when_missing(fake_container):
+    response = app.list_leaderboard_messages(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboard-messages",
+            params={"kind": "week"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response) == {"messages": []}
 
 
 def test_auth_enabled_rejects_missing_bearer_with_403(fake_container, monkeypatch):

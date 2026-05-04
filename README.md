@@ -336,28 +336,62 @@ Participant endpoints:
 - `GET /api/app/bootstrap?user_id=Jack`: returns the current user profile plus the active or next upcoming challenge.
 - `GET /api/challenges/{challenge_id}/leaderboards/latest?kind=week`
 - `GET /api/challenges/{challenge_id}/leaderboards?kind=week`
+- `GET /api/challenges/{challenge_id}/leaderboard-messages?kind=week`
+- `GET /api/leaderboard-messages/{ai_message_id}`
+- `GET /api/challenges/{challenge_id}/leaderboards/{leaderboard_id}/message`
 - `GET /api/challenges/{challenge_id}/scores?userID=Jack`
 
 Latest leaderboard `kind` may be `week`, `month`, `final`, or `current`. If no latest leaderboard exists, the API returns `200` with an empty `rows` array. The app uses `kind=week` as its running tally request, and an empty response has `kind: "current"` and `periodLabel: "Running tally"`.
 
-Leaderboard history can be requested without a `kind` query:
+Published leaderboard history can be requested with or without a `kind` query:
 
 `GET /api/challenges/{challenge_id}/leaderboards`
 
-This returns previous `week`, `month`, and `final` leaderboards:
+This returns previous `week`, `month`, and `final` leaderboard documents. The API supports both legacy `type: "leaderboard"` docs and scoring-job docs using `type: "leaderboard_week"`, `type: "leaderboard_month"`, or `type: "leaderboard_final"`. If a linked `leaderboard_ai_message` document exists, the response includes it as `message` plus `aiMessageId`.
 
 ```json
 {
   "leaderboards": [
     {
-      "leaderboardID": "lb_week_1",
+      "id": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+      "leaderboardID": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+      "type": "leaderboard_week",
       "challengeID": "challenge_2026_05_04",
+      "leaderboardKind": "week",
       "kind": "week",
       "periodLabel": "Week 1",
-      "periodStart": "2026-05-04",
-      "periodEnd": "2026-05-10",
-      "generatedAt": "2026-05-11T00:05:00Z",
-      "rows": []
+      "periodStartDate": "2026-05-10",
+      "periodEndDate": "2026-05-16",
+      "generatedAt": "2026-05-04T20:16:13Z",
+      "status": "published",
+      "rows": [],
+      "rankings": [],
+      "aiMessageId": "challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message",
+      "message": "Competition leaderboard feedback\n..."
+    }
+  ]
+}
+```
+
+Standalone AI leaderboard messages are available as a fallback:
+
+```json
+{
+  "messages": [
+    {
+      "id": "challenge_2026_05_04__2026-05-10__leaderboard_week__ai_message",
+      "type": "leaderboard_ai_message",
+      "challengeID": "challenge_2026_05_04",
+      "leaderboardId": "challenge_2026_05_04__2026-05-10__leaderboard_week",
+      "leaderboardType": "leaderboard_week",
+      "leaderboardKind": "week",
+      "periodStartDate": "2026-05-10",
+      "periodEndDate": "2026-05-16",
+      "status": "generated",
+      "channel": "app",
+      "message": "Competition leaderboard feedback\n...",
+      "generatedAt": "2026-05-04T20:16:13Z",
+      "version": 1
     }
   ]
 }

@@ -18,6 +18,14 @@ _competition_container = None
 APPLE_HEALTH_DATA_TYPE = "apple-health-data"
 COMPETITION_CONTAINER_SETTING = "COSMOS_COMPETITION_CONTAINER"
 DEFAULT_COMPETITION_CONTAINER = "fitness_competitions"
+LEADERBOARD_TYPES_BY_KIND = {
+    "week": "leaderboard_week",
+    "month": "leaderboard_month",
+    "final": "leaderboard_final",
+}
+PUBLISHED_LEADERBOARD_TYPES = set(LEADERBOARD_TYPES_BY_KIND.values())
+LEADERBOARD_KINDS = {"week", "month", "final"}
+LEADERBOARD_MESSAGE_TYPE = "leaderboard_ai_message"
 DEFAULT_CHALLENGE_RULES = {
     "description": "Each week is scored out of 45 points across weight trend, calorie adherence, food logging, active calories, and weigh-ins. Higher scores rank better; the lowest score loses the relevant period.",
     "scoring": [
@@ -1202,35 +1210,175 @@ def _leaderboard_query(
     if kind is not None and kind not in allowed_kinds:
         raise ApiError(400, "kind must be week, month, final, or current")
 
-    parameters = [
-        {"name": "@type", "value": "leaderboard"},
-        {"name": "@challengeID", "value": challenge_id},
-    ]
-    kind_filter = ""
+    query_kind = kind
+    items = _query_published_leaderboards(challenge_id, query_kind)
+    messages = _query_leaderboard_messages(challenge_id, query_kind)
+    enriched = _attach_leaderboard_messages(items, messages)
+    if latest:
+        if enriched:
+            return enriched[:1]
+        if messages:
+            return [_message_as_leaderboard(challenge_id, kind or "week", messages[0])]
+        return []
+    return enriched
+
+
+def _query_published_leaderboards(challenge_id: str, kind: str | None = None) -> list[dict[str, Any]]:
+    items = _query_items(
+        """
+        SELECT * FROM c
+        WHERE c.challengeID = @challengeID OR c.challengeId = @challengeID
+        """,
+        [{"name": "@challengeID", "value": challenge_id}],
+    )
+
+    filtered = []
+    for item in items:
+        if not _is_leaderboard_document(item):
+            continue
+        item_kind = _leaderboard_kind(item)
+        if kind is None and item_kind not in LEADERBOARD_KINDS:
+            continue
+        if kind is not None and item_kind != kind:
+            continue
+        status = item.get("status")
+        if status is not None and status != "published":
+            continue
+        filtered.append(item)
+
+    filtered.sort(key=_leaderboard_sort_key, reverse=True)
+    return filtered
+
+
+def _query_leaderboard_messages(
+    challenge_id: str | None = None,
+    kind: str | None = None,
+    leaderboard_id: str | None = None,
+    ai_message_id: str | None = None,
+) -> list[dict[str, Any]]:
+    parameters = [{"name": "@type", "value": LEADERBOARD_MESSAGE_TYPE}]
+    filters = ["c.type = @type"]
+    if ai_message_id is not None:
+        filters.append("c.id = @id")
+        parameters.append({"name": "@id", "value": ai_message_id})
+    if challenge_id is not None:
+        filters.append("(c.challengeID = @challengeID OR c.challengeId = @challengeID)")
+        parameters.append({"name": "@challengeID", "value": challenge_id})
     if kind is not None:
-        kind_filter = "AND c.kind = @kind"
+        filters.append("c.leaderboardKind = @kind")
         parameters.append({"name": "@kind", "value": kind})
+    if leaderboard_id is not None:
+        filters.append("c.leaderboardId = @leaderboardId")
+        parameters.append({"name": "@leaderboardId", "value": leaderboard_id})
 
     items = _query_items(
-        f"""
-        SELECT * FROM c
-        WHERE c.type = @type AND c.challengeID = @challengeID
-        {kind_filter}
-        """,
+        f"SELECT * FROM c WHERE {' AND '.join(filters)}",
         parameters,
     )
-    if kind is None:
-        items = [item for item in items if item.get("kind") in {"week", "month", "final"}]
-    items.sort(key=lambda item: item.get("generatedAt") or item.get("publishedAt") or "", reverse=True)
-    if latest:
-        return items[:1]
-    return items
+    filtered = [_strip_ai_message(item) for item in items if _is_allowed_ai_message(item, kind)]
+    filtered.sort(key=_leaderboard_sort_key, reverse=True)
+    return filtered
+
+
+def _is_leaderboard_document(document: dict[str, Any]) -> bool:
+    doc_type = document.get("type")
+    return doc_type == "leaderboard" or doc_type in PUBLISHED_LEADERBOARD_TYPES
+
+
+def _leaderboard_kind(document: dict[str, Any]) -> str | None:
+    kind = document.get("leaderboardKind") or document.get("kind")
+    if kind:
+        return kind
+    for candidate_kind, doc_type in LEADERBOARD_TYPES_BY_KIND.items():
+        if document.get("type") == doc_type:
+            return candidate_kind
+    return None
+
+
+def _leaderboard_sort_key(document: dict[str, Any]) -> str:
+    return (
+        document.get("periodEndDate")
+        or document.get("periodEnd")
+        or document.get("generatedAt")
+        or document.get("publishedAt")
+        or document.get("periodStartDate")
+        or document.get("periodStart")
+        or ""
+    )
+
+
+def _is_allowed_ai_message(document: dict[str, Any], kind: str | None = None) -> bool:
+    if kind is not None and document.get("leaderboardKind") != kind:
+        return False
+    channel = document.get("channel")
+    if channel is not None and channel != "app":
+        return False
+    status = document.get("status")
+    return status in (None, "generated", "published")
+
+
+def _strip_ai_message(document: dict[str, Any]) -> dict[str, Any]:
+    message = _strip_cosmos_fields(document)
+    if "challengeID" not in message and "challengeId" in message:
+        message["challengeID"] = message["challengeId"]
+    return message
+
+
+def _attach_leaderboard_messages(
+    leaderboards: list[dict[str, Any]], messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_leaderboard_id = {
+        message.get("leaderboardId"): message
+        for message in messages
+        if message.get("leaderboardId")
+    }
+    by_message_id = {message.get("id"): message for message in messages if message.get("id")}
+
+    enriched = []
+    for item in leaderboards:
+        leaderboard = _strip_leaderboard(item)
+        message = by_message_id.get(leaderboard.get("aiMessageId")) or by_leaderboard_id.get(
+            leaderboard.get("id")
+        ) or by_leaderboard_id.get(leaderboard.get("leaderboardID"))
+        if message:
+            leaderboard["aiMessageId"] = message["id"]
+            leaderboard["message"] = message.get("message", "")
+            leaderboard["aiMessage"] = message
+        enriched.append(leaderboard)
+    return enriched
+
+
+def _message_as_leaderboard(challenge_id: str, kind: str, message: dict[str, Any]) -> dict[str, Any]:
+    leaderboard_id = message.get("leaderboardId") or message["id"]
+    return {
+        "id": leaderboard_id,
+        "leaderboardID": leaderboard_id,
+        "challengeID": message.get("challengeID") or challenge_id,
+        "kind": "current" if kind == "week" else kind,
+        "leaderboardKind": message.get("leaderboardKind") or kind,
+        "periodLabel": "Running tally" if kind == "week" else kind.title(),
+        "periodStartDate": message.get("periodStartDate"),
+        "periodEndDate": message.get("periodEndDate"),
+        "generatedAt": message.get("generatedAt"),
+        "rows": [],
+        "aiMessageId": message["id"],
+        "message": message.get("message", ""),
+        "aiMessage": message,
+    }
 
 
 def _strip_leaderboard(document: dict[str, Any]) -> dict[str, Any]:
     leaderboard = _strip_cosmos_fields(document)
     if "leaderboardID" not in leaderboard and "id" in leaderboard:
         leaderboard["leaderboardID"] = leaderboard["id"]
+    if "challengeID" not in leaderboard and "challengeId" in leaderboard:
+        leaderboard["challengeID"] = leaderboard["challengeId"]
+    if "leaderboardKind" not in leaderboard:
+        kind = _leaderboard_kind(leaderboard)
+        if kind:
+            leaderboard["leaderboardKind"] = kind
+    if "kind" not in leaderboard and leaderboard.get("leaderboardKind"):
+        leaderboard["kind"] = leaderboard["leaderboardKind"]
     if "generatedAt" not in leaderboard and "publishedAt" in leaderboard:
         leaderboard["generatedAt"] = leaderboard["publishedAt"]
     if "rows" not in leaderboard and "entries" in leaderboard:
@@ -1261,6 +1409,46 @@ def latest_leaderboard(req: func.HttpRequest) -> func.HttpResponse:
         if not items:
             return _json_response(_empty_leaderboard(challenge_id, kind))
         return _json_response(_strip_leaderboard(items[0]))
+    except Exception as exc:
+        return _handle_competition_error(exc)
+
+
+@app.route(route="challenges/{challenge_id}/leaderboard-messages", methods=["GET"])
+def list_leaderboard_messages(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        _check_bearer_token(req)
+        challenge_id = _route_param(req, "challenge_id")
+        kind = req.params.get("kind")
+        if kind is not None and kind not in LEADERBOARD_KINDS:
+            raise ApiError(400, "kind must be week, month, or final")
+        return _json_response({"messages": _query_leaderboard_messages(challenge_id, kind)})
+    except Exception as exc:
+        return _handle_competition_error(exc)
+
+
+@app.route(route="leaderboard-messages/{ai_message_id}", methods=["GET"])
+def get_leaderboard_message(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        _check_bearer_token(req)
+        ai_message_id = _route_param(req, "ai_message_id")
+        messages = _query_leaderboard_messages(ai_message_id=ai_message_id)
+        if not messages:
+            raise ApiError(404, "Leaderboard message not found")
+        return _json_response(messages[0])
+    except Exception as exc:
+        return _handle_competition_error(exc)
+
+
+@app.route(route="challenges/{challenge_id}/leaderboards/{leaderboard_id}/message", methods=["GET"])
+def get_leaderboard_message_for_leaderboard(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        _check_bearer_token(req)
+        challenge_id = _route_param(req, "challenge_id")
+        leaderboard_id = _route_param(req, "leaderboard_id")
+        messages = _query_leaderboard_messages(challenge_id=challenge_id, leaderboard_id=leaderboard_id)
+        if not messages:
+            raise ApiError(404, "Leaderboard message not found")
+        return _json_response(messages[0])
     except Exception as exc:
         return _handle_competition_error(exc)
 
