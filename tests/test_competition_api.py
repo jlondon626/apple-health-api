@@ -309,11 +309,14 @@ def test_current_or_upcoming_returns_active_before_upcoming(fake_container):
     assert response.status_code == 200
     body = response_json(response)
     assert body["challengeID"] == "challenge_active"
-    assert "Higher scores rank better" in body["rules"]["description"]
+    assert body["rules"]["maxPoints"] == 45
+    assert "45 points" in body["rules"]["description"]
     assert isinstance(body["rules"]["scoring"], list)
-    assert body["rules"]["tieBreaker"] == "Highest active energy wins ties."
-    assert body["rules"]["sections"][0]["title"] == "Daily inputs"
+    assert body["rules"]["tieBreaker"] == "Highest active calories per kg wins ties, then most food logging days, then most weigh-in days."
+    assert body["rules"]["sections"][0]["title"] == "Weight trend"
     assert "requiredDailyMetrics" in body["rules"]["minimumData"]
+    assert body["rules"]["categories"]["weightTrend"]["maxPointsIfBelowMinDataPoints"] == 3
+    assert body["rules"]["categories"]["activeCalories"]["definition"] == "totalWeeklyActiveCalories / averageBodyweightKg"
 
 
 def test_challenge_settings_returns_rules(fake_container):
@@ -342,7 +345,7 @@ def test_challenge_settings_returns_rules(fake_container):
     assert response.status_code == 200
     body = response_json(response)
     assert body["rules"]["description"] == "Custom rules"
-    assert body["rules"]["healthDataWindow"] == "Complete local calendar days only."
+    assert body["rules"]["healthDataWindow"] == "Complete local calendar days only. Weekly scores use the configured challenge week."
 
 
 def test_bootstrap_returns_challenge_with_detailed_rules(fake_container):
@@ -379,10 +382,13 @@ def test_bootstrap_returns_challenge_with_detailed_rules(fake_container):
     assert isinstance(challenge["rules"]["scoring"], list)
     assert isinstance(challenge["rules"]["sections"], list)
     assert isinstance(challenge["rules"]["sections"][0]["points"], list)
+    assert challenge["rules"]["maxPoints"] == 45
     assert challenge["rules"]["minimumData"]["requiredDailyMetrics"] == [
-        "active_energy_kcal",
-        "exercise_minutes",
-        "stand_hours",
+        "weeklyWeightChangePct",
+        "averageDailyCalorieVariance",
+        "daysWithFoodLogged",
+        "weeklyActiveCaloriesPerKg",
+        "daysWithWeighIn",
     ]
 
 

@@ -208,50 +208,93 @@ This backend does not access Renpho or FatSecret directly and does not store the
   "weekStartsOn": "SUNDAY",
   "participants": ["Jack", "Ash"],
   "rules": {
-    "description": "Each participant is scored from complete daily health data. Higher scores rank better; the lowest score loses the relevant period.",
+    "description": "Each week is scored out of 45 points across weight trend, calorie adherence, food logging, active calories, and weigh-ins. Higher scores rank better; the lowest score loses the relevant period.",
     "scoring": [
-      "Daily score is built from active energy, exercise minutes, and stand hours synced from Apple Health.",
-      "Weekly score is the sum of eligible daily scores in the challenge week.",
-      "Monthly score is the sum of eligible daily scores in the calendar month.",
-      "Final score is the sum of all eligible daily scores across the challenge.",
+      "Weight trend is worth up to 10 points based on weekly percentage bodyweight change.",
+      "Calorie adherence is worth up to 10 points based on average daily variance from target calories.",
+      "Food logging is worth up to 10 points based on the number of days food is logged.",
+      "Active calories are worth up to 10 points based on weekly active calories per kg of bodyweight.",
+      "Weigh-ins are worth up to 5 points based on the number of days with a weigh-in.",
+      "Weekly maximum score is 45 points.",
       "Leaderboard generation is handled by the scoring job; this API exposes the published results."
     ],
-    "tieBreaker": "Highest active energy wins ties.",
-    "healthDataWindow": "Complete local calendar days only.",
+    "tieBreaker": "Highest active calories per kg wins ties, then most food logging days, then most weigh-in days.",
+    "healthDataWindow": "Complete local calendar days only. Weekly scores use the configured challenge week.",
     "sections": [
       {
-        "title": "Daily inputs",
+        "title": "Weight trend",
         "points": [
-          "Active energy is measured in kcal.",
-          "Exercise is measured in Apple exercise minutes.",
-          "Standing is measured as stand hours.",
-          "Only complete local calendar days are used."
+          "Worth up to 10 points.",
+          "Metric: weeklyWeightChangePct.",
+          "Best band: -1.0% to -0.25% bodyweight change earns 10 points.",
+          "Requires at least 5 weigh-ins; below that, this category is capped at 3 points."
         ]
       },
       {
-        "title": "Eligibility and minimum data",
+        "title": "Calorie adherence",
         "points": [
-          "A day is eligible when the scoring job has enough synced data to calculate active energy, exercise minutes, and stand hours.",
-          "If a required metric is missing, the scoring job may treat that metric as zero for that day.",
-          "If too many required daily data points are missing in a period, the scoring job may cap or penalise that period score.",
-          "Manual missing-date upload should be used to fill gaps before a leaderboard is generated."
+          "Worth up to 10 points.",
+          "Metric: averageDailyCalorieVariance.",
+          "Within 100 kcal of target earns 10 points.",
+          "Requires at least 3 logged calorie days; below that, this category is capped at 3 points."
         ]
       }
     ],
     "minimumData": {
       "requiredDailyMetrics": [
-        "active_energy_kcal",
-        "exercise_minutes",
-        "stand_hours"
+        "weeklyWeightChangePct",
+        "averageDailyCalorieVariance",
+        "daysWithFoodLogged",
+        "weeklyActiveCaloriesPerKg",
+        "daysWithWeighIn"
       ],
-      "missingMetricTreatment": "Missing required metrics may be scored as zero by the scoring job.",
-      "missingDayTreatment": "Missing days remain missing until uploaded; they may reduce or cap a period score."
+      "missingMetricTreatment": "Missing data can reduce the category score or trigger the category-specific cap.",
+      "missingDayTreatment": "Missing source data remains missing until synced; low data volume may cap weight trend, calorie adherence, and active calorie scores."
     },
     "caps": {
-      "description": "Exact caps are applied by the scoring job and may change by scoringVersion.",
-      "activeEnergy": "May be capped per day.",
-      "exerciseMinutes": "May be capped per day.",
-      "standHours": "Apple stand hours naturally cap at the daily maximum available from Apple Health."
+      "description": "Category scores are capped when minimum data requirements are not met.",
+      "weightTrend": "If fewer than 5 weigh-ins are available, weight trend is capped at 3 points.",
+      "calorieAdherence": "If fewer than 3 calorie data points are available, calorie adherence is capped at 3 points.",
+      "activeCalories": "If fewer than 5 active calorie days are available, active calories are capped at 3 points."
+    },
+    "maxPoints": 45,
+    "categories": {
+      "weightTrend": {
+        "label": "Weight trend",
+        "maxPoints": 10,
+        "metric": "weeklyWeightChangePct",
+        "minDataPoints": 5,
+        "maxPointsIfBelowMinDataPoints": 3
+      },
+      "calorieAdherence": {
+        "label": "Calorie adherence",
+        "maxPoints": 10,
+        "metric": "averageDailyCalorieVariance",
+        "minDataPoints": 3,
+        "maxPointsIfBelowMinDataPoints": 3
+      },
+      "foodLogging": {
+        "label": "Food logging",
+        "maxPoints": 10,
+        "metric": "daysWithFoodLogged"
+      },
+      "activeCalories": {
+        "label": "Active calories",
+        "maxPoints": 10,
+        "metric": "weeklyActiveCaloriesPerKg",
+        "definition": "totalWeeklyActiveCalories / averageBodyweightKg",
+        "minDataPoints": 5,
+        "maxPointsIfBelowMinDataPoints": 3
+      },
+      "weighIns": {
+        "label": "Weigh-ins",
+        "maxPoints": 5,
+        "metric": "daysWithWeighIn"
+      }
+    },
+    "aggregation": {
+      "method": "sum",
+      "capAtMaxPoints": true
     }
   },
   "forfeits": {},
@@ -318,6 +361,28 @@ This returns previous `week`, `month`, and `final` leaderboards:
     }
   ]
 }
+```
+
+To seed fake leaderboard documents for frontend testing, run:
+
+```bash
+python scripts/seed_fake_leaderboards.py --challenge-id challenge_2026_05_04
+```
+
+Preview the documents without writing to Cosmos:
+
+```bash
+python scripts/seed_fake_leaderboards.py --challenge-id challenge_2026_05_04 --dry-run
+```
+
+The script reads `local.settings.json` and upserts fake `current`, `week`, `month`, and `final` leaderboard documents into `COSMOS_COMPETITION_CONTAINER`. After seeding, test the frontend with:
+
+```bash
+curl "http://localhost:7071/api/challenges/challenge_2026_05_04/leaderboards/latest?kind=current" ^
+  -H "Authorization: Bearer <token>"
+
+curl "http://localhost:7071/api/challenges/challenge_2026_05_04/leaderboards" ^
+  -H "Authorization: Bearer <token>"
 ```
 
 ## Deploy
