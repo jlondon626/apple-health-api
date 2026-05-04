@@ -11,6 +11,7 @@ from azure.cosmos import CosmosClient, exceptions
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 _container = None
+APPLE_HEALTH_DATA_TYPE = "apple-health-data"
 
 
 class ApiError(Exception):
@@ -80,7 +81,12 @@ def _validate_row(row: Any, index: int) -> dict[str, Any]:
     if not isinstance(user_id, str) or not user_id.strip():
         raise ApiError(400, f"Row {index} user_id is required")
 
+    row_type = row.get("type", APPLE_HEALTH_DATA_TYPE)
+    if row_type != APPLE_HEALTH_DATA_TYPE:
+        raise ApiError(400, f"Row {index} type must be {APPLE_HEALTH_DATA_TYPE}")
+
     return {
+        "type": APPLE_HEALTH_DATA_TYPE,
         "user_id": user_id.strip(),
         "date": _parse_local_date(row.get("date"), f"Row {index} date"),
         "active_energy_kcal": _parse_number(
@@ -162,11 +168,13 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
         SELECT c.date
         FROM c
         WHERE c.userID = @userID
+          AND c.type = @type
           AND c.date >= @startDate
           AND c.date <= @endDate
     """
     parameters = [
         {"name": "@userID", "value": user_id},
+        {"name": "@type", "value": APPLE_HEALTH_DATA_TYPE},
         {"name": "@startDate", "value": start_date},
         {"name": "@endDate", "value": end_date},
     ]
