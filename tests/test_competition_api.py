@@ -691,7 +691,7 @@ def test_leaderboard_messages_endpoint_and_single_lookups(fake_container):
     assert response_json(by_leaderboard_response)["id"] == message_doc["id"]
 
 
-def test_latest_leaderboard_uses_message_when_no_leaderboard_doc_exists(fake_container):
+def test_latest_leaderboard_does_not_treat_message_as_leaderboard(fake_container):
     fake_container.upsert_item(
         {
             "id": "message_only",
@@ -720,9 +720,9 @@ def test_latest_leaderboard_uses_message_when_no_leaderboard_doc_exists(fake_con
 
     assert response.status_code == 200
     body = response_json(response)
-    assert body["leaderboardID"] == "missing_leaderboard_doc"
-    assert body["aiMessageId"] == "message_only"
-    assert body["message"] == "Message-only leaderboard feedback"
+    assert body["leaderboardID"] == "empty_challenge_2026_05_04_week"
+    assert "aiMessageId" not in body
+    assert "message" not in body
     assert body["rows"] == []
 
 

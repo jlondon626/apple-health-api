@@ -1217,8 +1217,6 @@ def _leaderboard_query(
     if latest:
         if enriched:
             return enriched[:1]
-        if messages:
-            return [_message_as_leaderboard(challenge_id, kind or "week", messages[0])]
         return []
     return enriched
 
@@ -1346,25 +1344,6 @@ def _attach_leaderboard_messages(
             leaderboard["aiMessage"] = message
         enriched.append(leaderboard)
     return enriched
-
-
-def _message_as_leaderboard(challenge_id: str, kind: str, message: dict[str, Any]) -> dict[str, Any]:
-    leaderboard_id = message.get("leaderboardId") or message["id"]
-    return {
-        "id": leaderboard_id,
-        "leaderboardID": leaderboard_id,
-        "challengeID": message.get("challengeID") or challenge_id,
-        "kind": "current" if kind == "week" else kind,
-        "leaderboardKind": message.get("leaderboardKind") or kind,
-        "periodLabel": "Running tally" if kind == "week" else kind.title(),
-        "periodStartDate": message.get("periodStartDate"),
-        "periodEndDate": message.get("periodEndDate"),
-        "generatedAt": message.get("generatedAt"),
-        "rows": [],
-        "aiMessageId": message["id"],
-        "message": message.get("message", ""),
-        "aiMessage": message,
-    }
 
 
 def _strip_leaderboard(document: dict[str, Any]) -> dict[str, Any]:
