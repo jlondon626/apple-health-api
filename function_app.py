@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -23,6 +24,29 @@ COSMOS_SYSTEM_FIELDS = {
     "_attachments",
     "_ts",
 }
+SECRET_FIELD_PATTERNS = (
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "apikey",
+    "api_key",
+    "accesskey",
+    "access_key",
+    "clientsecret",
+    "client_secret",
+    "connectionstring",
+    "connection_string",
+    "functionappsetting",
+    "function_app_setting",
+    "functionsetting",
+    "function_setting",
+    "settingname",
+    "setting_name",
+    "azurewebjobs",
+)
+SAFE_NON_SECRET_FIELD_NAMES = {"fatsecret"}
+SAFE_CREDENTIAL_REF_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
 class ApiError(Exception):
@@ -111,6 +135,30 @@ def _validation_error_response(exc: ValidationError) -> func.HttpResponse:
         for error in exc.errors()
     ]
     return _json_response({"ok": False, "error": "Validation failed", "details": errors}, 400)
+
+
+def _looks_secret_field(field_name: str) -> bool:
+    normalised = "".join(char.lower() for char in field_name if char.isalnum() or char == "_")
+    if normalised in SAFE_NON_SECRET_FIELD_NAMES:
+        return False
+    return any(pattern in normalised for pattern in SECRET_FIELD_PATTERNS)
+
+
+def _reject_secret_fields(value: Any, path: str = "body") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _looks_secret_field(str(key)):
+                raise ApiError(400, f"{path}.{key} must not contain secrets or secret references")
+            _reject_secret_fields(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_secret_fields(child, f"{path}[{index}]")
+
+
+def _get_json_body(req: func.HttpRequest) -> Any:
+    payload = req.get_json()
+    _reject_secret_fields(payload)
+    return payload
 
 
 def _parse_local_date(value: Any, field_name: str) -> str:
@@ -265,7 +313,7 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
 
 
 def _store_health_export(req: func.HttpRequest) -> func.HttpResponse:
-    rows = _validate_rows(req.get_json())
+    rows = _validate_rows(_get_json_body(req))
 
     container = _get_container()
     documents = [_build_document(row) for row in rows]
@@ -310,6 +358,46 @@ def health_export(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"ok": False, "error": "Internal server error"}, status_code=500)
 
 
+class SourceCredentialMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    credentialRef: str | None = None
+
+    @field_validator("credentialRef")
+    @classmethod
+    def _safe_credential_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        cleaned = value.strip().lower()
+        if not SAFE_CREDENTIAL_REF_PATTERN.fullmatch(cleaned) or _looks_secret_field(cleaned):
+            raise ValueError("must be a short safe identifier using lowercase letters, numbers, _ or -")
+        return cleaned
+
+
+class AppleHealthSourceMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+
+
+class SyncSources(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    renpho: SourceCredentialMetadata = Field(default_factory=SourceCredentialMetadata)
+    fatsecret: SourceCredentialMetadata = Field(default_factory=SourceCredentialMetadata)
+    appleHealth: AppleHealthSourceMetadata = Field(default_factory=AppleHealthSourceMetadata)
+
+    @field_validator("renpho", "fatsecret")
+    @classmethod
+    def _credential_required_when_enabled(
+        cls, value: SourceCredentialMetadata
+    ) -> SourceCredentialMetadata:
+        if value.enabled and not value.credentialRef:
+            raise ValueError("credentialRef is required when source is enabled")
+        return value
+
+
 class UserCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -319,6 +407,7 @@ class UserCreate(BaseModel):
     goalWeightKg: float | None = None
     weeklyCalorieTarget: float | None = None
     active: bool = True
+    syncSources: SyncSources = Field(default_factory=SyncSources)
 
     @field_validator("userID", "displayName", "timezone")
     @classmethod
@@ -341,6 +430,7 @@ class UserPatch(BaseModel):
     goalWeightKg: float | None = None
     weeklyCalorieTarget: float | None = None
     active: bool | None = None
+    syncSources: SyncSources | None = None
 
     @field_validator("displayName", "timezone")
     @classmethod
@@ -353,6 +443,15 @@ class UserPatch(BaseModel):
         if value is not None and value <= 0:
             raise ValueError("must be a positive number")
         return value
+
+
+class SyncSourcesPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    syncSources: SyncSources | None = None
+    renpho: SourceCredentialMetadata | None = None
+    fatsecret: SourceCredentialMetadata | None = None
+    appleHealth: AppleHealthSourceMetadata | None = None
 
 
 class ChallengeCreate(BaseModel):
@@ -545,6 +644,24 @@ def _create_or_update_user(payload: UserCreate) -> dict[str, Any]:
     return _strip_cosmos_fields(_get_competition_container().upsert_item(user))
 
 
+def _merge_sync_sources(existing: dict[str, Any], patch: SyncSourcesPatch) -> dict[str, Any]:
+    current = existing.get("syncSources") or {}
+    if patch.syncSources is not None:
+        return _model_payload(patch.syncSources)
+
+    merged = {
+        **_model_payload(SyncSources()),
+        **current,
+    }
+    updates = _model_payload(patch, exclude_unset=True)
+    updates.pop("syncSources", None)
+    for source_name, source_value in updates.items():
+        if source_value is not None:
+            merged[source_name] = source_value
+
+    return _model_payload(SyncSources.model_validate(merged))
+
+
 def _create_challenge(payload: ChallengeCreate) -> dict[str, Any]:
     _ensure_date_order(payload.startDate, payload.endDate)
     challenge_id = payload.challengeID or f"challenge_{payload.startDate.replace('-', '_')}"
@@ -571,7 +688,7 @@ def _route_param(req: func.HttpRequest, name: str) -> str:
 def create_user(req: func.HttpRequest) -> func.HttpResponse:
     try:
         _check_bearer_token(req)
-        return _json_response(_create_or_update_user(UserCreate.model_validate(req.get_json())), 201)
+        return _json_response(_create_or_update_user(UserCreate.model_validate(_get_json_body(req))), 201)
     except Exception as exc:
         return _handle_competition_error(exc)
 
@@ -615,10 +732,29 @@ def patch_user(req: func.HttpRequest) -> func.HttpResponse:
         existing = _get_user_document(user_id)
         if not existing:
             raise ApiError(404, "User not found")
-        patch = UserPatch.model_validate(req.get_json())
+        patch = UserPatch.model_validate(_get_json_body(req))
         updated = {
             **existing,
             **_model_payload(patch, exclude_unset=True),
+            "updatedAt": _utc_now(),
+        }
+        return _json_response(_strip_cosmos_fields(_get_competition_container().upsert_item(updated)))
+    except Exception as exc:
+        return _handle_competition_error(exc)
+
+
+@app.route(route="users/{user_id}/sync-sources", methods=["PATCH"])
+def patch_user_sync_sources(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        _check_bearer_token(req)
+        user_id = _route_param(req, "user_id")
+        existing = _get_user_document(user_id)
+        if not existing:
+            raise ApiError(404, "User not found")
+        patch = SyncSourcesPatch.model_validate(_get_json_body(req))
+        updated = {
+            **existing,
+            "syncSources": _merge_sync_sources(existing, patch),
             "updatedAt": _utc_now(),
         }
         return _json_response(_strip_cosmos_fields(_get_competition_container().upsert_item(updated)))
@@ -697,7 +833,7 @@ def current_or_upcoming_challenge(req: func.HttpRequest) -> func.HttpResponse:
 def create_challenge(req: func.HttpRequest) -> func.HttpResponse:
     try:
         _check_bearer_token(req)
-        return _json_response(_create_challenge(ChallengeCreate.model_validate(req.get_json())), 201)
+        return _json_response(_create_challenge(ChallengeCreate.model_validate(_get_json_body(req))), 201)
     except Exception as exc:
         return _handle_competition_error(exc)
 
@@ -722,7 +858,7 @@ def patch_challenge(req: func.HttpRequest) -> func.HttpResponse:
         existing = _get_challenge_document(challenge_id)
         if not existing:
             raise ApiError(404, "Challenge not found")
-        patch = ChallengePatch.model_validate(req.get_json())
+        patch = ChallengePatch.model_validate(_get_json_body(req))
         updated = {**existing, **_model_payload(patch, exclude_unset=True), "updatedAt": _utc_now()}
         _ensure_date_order(updated["startDate"], updated["endDate"])
         return _json_response(_enrich_challenge(_get_competition_container().upsert_item(updated)))
@@ -793,7 +929,7 @@ def add_participant(req: func.HttpRequest) -> func.HttpResponse:
         challenge = _get_challenge_document(challenge_id)
         if not challenge:
             raise ApiError(404, "Challenge not found")
-        payload = ParticipantCreate.model_validate(req.get_json())
+        payload = ParticipantCreate.model_validate(_get_json_body(req))
         user = _get_user_document(payload.userID)
         if not user:
             raise ApiError(404, "User not found")
@@ -826,7 +962,7 @@ def patch_participant(req: func.HttpRequest) -> func.HttpResponse:
         participant = _get_participant_document(challenge_id, user_id)
         if not participant:
             raise ApiError(404, "Participant not found")
-        patch = ParticipantPatch.model_validate(req.get_json())
+        patch = ParticipantPatch.model_validate(_get_json_body(req))
         updated = {**participant, **_model_payload(patch, exclude_unset=True), "updatedAt": _utc_now()}
         return _json_response(_strip_cosmos_fields(_get_competition_container().upsert_item(updated)))
     except Exception as exc:

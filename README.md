@@ -142,18 +142,54 @@ The competition API uses the same bearer token as the health export endpoint. Do
   "timezone": "Europe/London",
   "goalWeightKg": 87,
   "weeklyCalorieTarget": 16800,
-  "active": true
+  "active": true,
+  "syncSources": {
+    "renpho": {
+      "enabled": true,
+      "credentialRef": "jack"
+    },
+    "fatsecret": {
+      "enabled": true,
+      "credentialRef": "jack"
+    },
+    "appleHealth": {
+      "enabled": true
+    }
+  }
 }
 ```
 
 Creates or upserts a user document with deterministic `id`, for example `user_jack`.
+
+`syncSources` stores safe metadata only. The API rejects fields that look like passwords, tokens, API keys, client secrets, access secrets, connection strings, or Function App setting names. `credentialRef` must be a short safe identifier such as `jack` or `ash`; it is not a secret. If `renpho.enabled` or `fatsecret.enabled` is `true`, that source must include `credentialRef`.
 
 Other user endpoints:
 
 - `GET /api/users`
 - `GET /api/users/{user_id}`
 - `PATCH /api/users/{user_id}`
+- `PATCH /api/users/{user_id}/sync-sources`
 - `GET /api/users/{user_id}/profile-check`
+
+Example sync-source patch:
+
+```json
+{
+  "renpho": {
+    "enabled": false,
+    "credentialRef": "ash"
+  },
+  "fatsecret": {
+    "enabled": false,
+    "credentialRef": "ash"
+  },
+  "appleHealth": {
+    "enabled": true
+  }
+}
+```
+
+This backend does not access Renpho or FatSecret directly and does not store their passwords, tokens, API secrets, or Azure Function setting names.
 
 ### Challenges
 

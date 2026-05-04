@@ -138,6 +138,113 @@ def test_create_and_patch_user(fake_container):
     assert patched["updatedAt"] >= created["updatedAt"]
 
 
+def test_create_user_with_sync_sources(fake_container):
+    response = app.create_user(
+        request(
+            "POST",
+            "/api/users",
+            {
+                "userID": "Ash",
+                "displayName": "Ash",
+                "goalWeightKg": 90,
+                "weeklyCalorieTarget": 16000,
+                "syncSources": {
+                    "renpho": {"enabled": False, "credentialRef": "ash"},
+                    "fatsecret": {"enabled": False, "credentialRef": "ash"},
+                    "appleHealth": {"enabled": True},
+                },
+            },
+        )
+    )
+
+    assert response.status_code == 201
+    created = response_json(response)
+    assert created["syncSources"]["renpho"] == {"enabled": False, "credentialRef": "ash"}
+    assert created["syncSources"]["appleHealth"] == {"enabled": True}
+
+
+def test_sync_sources_patch_requires_credential_ref_when_enabled(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "user_jack",
+            "type": "user",
+            "userID": "Jack",
+            "displayName": "Jack",
+            "syncSources": {
+                "renpho": {"enabled": False, "credentialRef": None},
+                "fatsecret": {"enabled": False, "credentialRef": "jack"},
+                "appleHealth": {"enabled": True},
+            },
+        }
+    )
+
+    invalid_response = app.patch_user_sync_sources(
+        request(
+            "PATCH",
+            "/api/users/Jack/sync-sources",
+            {"renpho": {"enabled": True}},
+            route_params={"user_id": "Jack"},
+        )
+    )
+
+    assert invalid_response.status_code == 400
+    assert response_json(invalid_response)["error"] == "Validation failed"
+
+    valid_response = app.patch_user_sync_sources(
+        request(
+            "PATCH",
+            "/api/users/Jack/sync-sources",
+            {"renpho": {"enabled": True, "credentialRef": "jack"}},
+            route_params={"user_id": "Jack"},
+        )
+    )
+
+    assert valid_response.status_code == 200
+    updated = response_json(valid_response)
+    assert updated["syncSources"]["renpho"] == {"enabled": True, "credentialRef": "jack"}
+    assert updated["syncSources"]["fatsecret"] == {"enabled": False, "credentialRef": "jack"}
+
+
+def test_secret_like_user_fields_are_rejected(fake_container):
+    response = app.create_user(
+        request(
+            "POST",
+            "/api/users",
+            {
+                "userID": "Jack",
+                "displayName": "Jack",
+                "goalWeightKg": 87,
+                "weeklyCalorieTarget": 16800,
+                "renphoPassword": "do-not-store",
+            },
+        )
+    )
+
+    assert response.status_code == 400
+    assert "must not contain secrets" in response_json(response)["error"]
+
+
+def test_secret_like_credential_ref_is_rejected(fake_container):
+    response = app.create_user(
+        request(
+            "POST",
+            "/api/users",
+            {
+                "userID": "Jack",
+                "displayName": "Jack",
+                "goalWeightKg": 87,
+                "weeklyCalorieTarget": 16800,
+                "syncSources": {
+                    "renpho": {"enabled": True, "credentialRef": "azure_renpho_token"},
+                },
+            },
+        )
+    )
+
+    assert response.status_code == 400
+    assert response_json(response)["error"] == "Validation failed"
+
+
 def test_current_or_upcoming_returns_active_before_upcoming(fake_container):
     fake_container.upsert_item(
         {
