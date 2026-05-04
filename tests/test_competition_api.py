@@ -298,6 +298,7 @@ def test_current_or_upcoming_returns_active_before_upcoming(fake_container):
             "startDate": "2026-05-01",
             "endDate": "2026-05-31",
             "participants": [],
+            "rules": {},
         }
     )
 
@@ -306,7 +307,83 @@ def test_current_or_upcoming_returns_active_before_upcoming(fake_container):
     )
 
     assert response.status_code == 200
-    assert response_json(response)["challengeID"] == "challenge_active"
+    body = response_json(response)
+    assert body["challengeID"] == "challenge_active"
+    assert "Higher scores rank better" in body["rules"]["description"]
+    assert isinstance(body["rules"]["scoring"], list)
+    assert body["rules"]["tieBreaker"] == "Highest active energy wins ties."
+    assert body["rules"]["sections"][0]["title"] == "Daily inputs"
+    assert "requiredDailyMetrics" in body["rules"]["minimumData"]
+
+
+def test_challenge_settings_returns_rules(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04",
+            "type": "challenge",
+            "challengeID": "challenge_2026_05_04",
+            "name": "League",
+            "status": "active",
+            "startDate": "2026-05-04",
+            "endDate": "2026-06-01",
+            "participants": [],
+            "rules": {"description": "Custom rules"},
+        }
+    )
+
+    response = app.challenge_settings(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/settings",
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert body["rules"]["description"] == "Custom rules"
+    assert body["rules"]["healthDataWindow"] == "Complete local calendar days only."
+
+
+def test_bootstrap_returns_challenge_with_detailed_rules(fake_container):
+    fake_container.upsert_item(
+        {
+            "id": "user_jack",
+            "type": "user",
+            "userID": "Jack",
+            "displayName": "Jack",
+            "active": True,
+        }
+    )
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04",
+            "type": "challenge",
+            "challengeID": "challenge_2026_05_04",
+            "name": "League",
+            "status": "active",
+            "startDate": "2026-05-04",
+            "endDate": "2026-06-01",
+            "participants": ["Jack"],
+        }
+    )
+
+    response = app.app_bootstrap(
+        request("GET", "/api/app/bootstrap", params={"user_id": "Jack"})
+    )
+
+    assert response.status_code == 200
+    challenge = response_json(response)["challenge"]
+    assert challenge["challengeID"] == "challenge_2026_05_04"
+    assert isinstance(challenge["rules"], dict)
+    assert isinstance(challenge["rules"]["scoring"], list)
+    assert isinstance(challenge["rules"]["sections"], list)
+    assert isinstance(challenge["rules"]["sections"][0]["points"], list)
+    assert challenge["rules"]["minimumData"]["requiredDailyMetrics"] == [
+        "active_energy_kcal",
+        "exercise_minutes",
+        "stand_hours",
+    ]
 
 
 def test_participant_add_and_remove_updates_challenge(fake_container):
@@ -392,7 +469,81 @@ def test_latest_leaderboard_read(fake_container):
     assert response.status_code == 200
     body = response_json(response)
     assert body["id"] == "leaderboard_new"
+    assert body["leaderboardID"] == "leaderboard_new"
     assert body["generatedAt"] == "2026-05-18T00:00:00Z"
+
+
+def test_latest_leaderboard_returns_empty_rows_when_missing(fake_container):
+    response = app.latest_leaderboard(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards/latest",
+            params={"kind": "week"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert body["challengeID"] == "challenge_2026_05_04"
+    assert body["kind"] == "current"
+    assert body["periodLabel"] == "Running tally"
+    assert body["rows"] == []
+
+
+def test_leaderboard_history_returns_week_month_and_final(fake_container):
+    for item in [
+        {
+            "id": "lb_week_1",
+            "type": "leaderboard",
+            "challengeID": "challenge_2026_05_04",
+            "kind": "week",
+            "periodLabel": "Week 1",
+            "generatedAt": "2026-05-11T00:05:00Z",
+            "rows": [{"rank": 1, "userID": "Ash", "score": 88}],
+        },
+        {
+            "id": "lb_month_2026_05",
+            "type": "leaderboard",
+            "challengeID": "challenge_2026_05_04",
+            "kind": "month",
+            "periodLabel": "May 2026",
+            "generatedAt": "2026-06-01T00:05:00Z",
+            "rows": [],
+        },
+        {
+            "id": "lb_final",
+            "type": "leaderboard",
+            "challengeID": "challenge_2026_05_04",
+            "kind": "final",
+            "periodLabel": "Final",
+            "generatedAt": "2026-06-02T00:05:00Z",
+            "rows": [],
+        },
+        {
+            "id": "lb_current",
+            "type": "leaderboard",
+            "challengeID": "challenge_2026_05_04",
+            "kind": "current",
+            "periodLabel": "Running tally",
+            "generatedAt": "2026-05-20T00:05:00Z",
+            "rows": [],
+        },
+    ]:
+        fake_container.upsert_item(item)
+
+    response = app.list_leaderboards(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/leaderboards",
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    leaderboards = response_json(response)["leaderboards"]
+    assert {item["kind"] for item in leaderboards} == {"week", "month", "final"}
+    assert all("leaderboardID" in item for item in leaderboards)
 
 
 def test_auth_enabled_rejects_missing_bearer_with_403(fake_container, monkeypatch):

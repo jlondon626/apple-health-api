@@ -207,6 +207,53 @@ This backend does not access Renpho or FatSecret directly and does not store the
   "timezone": "Europe/London",
   "weekStartsOn": "SUNDAY",
   "participants": ["Jack", "Ash"],
+  "rules": {
+    "description": "Each participant is scored from complete daily health data. Higher scores rank better; the lowest score loses the relevant period.",
+    "scoring": [
+      "Daily score is built from active energy, exercise minutes, and stand hours synced from Apple Health.",
+      "Weekly score is the sum of eligible daily scores in the challenge week.",
+      "Monthly score is the sum of eligible daily scores in the calendar month.",
+      "Final score is the sum of all eligible daily scores across the challenge.",
+      "Leaderboard generation is handled by the scoring job; this API exposes the published results."
+    ],
+    "tieBreaker": "Highest active energy wins ties.",
+    "healthDataWindow": "Complete local calendar days only.",
+    "sections": [
+      {
+        "title": "Daily inputs",
+        "points": [
+          "Active energy is measured in kcal.",
+          "Exercise is measured in Apple exercise minutes.",
+          "Standing is measured as stand hours.",
+          "Only complete local calendar days are used."
+        ]
+      },
+      {
+        "title": "Eligibility and minimum data",
+        "points": [
+          "A day is eligible when the scoring job has enough synced data to calculate active energy, exercise minutes, and stand hours.",
+          "If a required metric is missing, the scoring job may treat that metric as zero for that day.",
+          "If too many required daily data points are missing in a period, the scoring job may cap or penalise that period score.",
+          "Manual missing-date upload should be used to fill gaps before a leaderboard is generated."
+        ]
+      }
+    ],
+    "minimumData": {
+      "requiredDailyMetrics": [
+        "active_energy_kcal",
+        "exercise_minutes",
+        "stand_hours"
+      ],
+      "missingMetricTreatment": "Missing required metrics may be scored as zero by the scoring job.",
+      "missingDayTreatment": "Missing days remain missing until uploaded; they may reduce or cap a period score."
+    },
+    "caps": {
+      "description": "Exact caps are applied by the scoring job and may change by scoringVersion.",
+      "activeEnergy": "May be capped per day.",
+      "exerciseMinutes": "May be capped per day.",
+      "standHours": "Apple stand hours naturally cap at the daily maximum available from Apple Health."
+    }
+  },
   "forfeits": {},
   "scoringVersion": "v1"
 }
@@ -219,7 +266,7 @@ Other challenge endpoints:
 - `PATCH /api/challenges/{challenge_id}`
 - `GET /api/challenges/{challenge_id}/settings`
 
-Challenge responses include `participantProfiles` where useful. If the stored challenge has `forfeits`, responses also include `forfeitDetails` as an app-friendly alias.
+Challenge responses include `rules`, `participantProfiles` where useful, and `forfeits` as an object keyed by `weekly`, `monthly`, and `championship`. If the stored challenge has `forfeits`, responses also include `forfeitDetails` as an app-friendly alias. If a stored challenge has no `rules`, the API returns default display rules.
 
 ### Participants
 
@@ -248,7 +295,30 @@ Participant endpoints:
 - `GET /api/challenges/{challenge_id}/leaderboards?kind=week`
 - `GET /api/challenges/{challenge_id}/scores?userID=Jack`
 
-Leaderboard `kind` must be `week`, `month`, or `final`.
+Latest leaderboard `kind` may be `week`, `month`, `final`, or `current`. If no latest leaderboard exists, the API returns `200` with an empty `rows` array. The app uses `kind=week` as its running tally request, and an empty response has `kind: "current"` and `periodLabel: "Running tally"`.
+
+Leaderboard history can be requested without a `kind` query:
+
+`GET /api/challenges/{challenge_id}/leaderboards`
+
+This returns previous `week`, `month`, and `final` leaderboards:
+
+```json
+{
+  "leaderboards": [
+    {
+      "leaderboardID": "lb_week_1",
+      "challengeID": "challenge_2026_05_04",
+      "kind": "week",
+      "periodLabel": "Week 1",
+      "periodStart": "2026-05-04",
+      "periodEnd": "2026-05-10",
+      "generatedAt": "2026-05-11T00:05:00Z",
+      "rows": []
+    }
+  ]
+}
+```
 
 ## Deploy
 

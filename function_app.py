@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -17,6 +18,70 @@ _competition_container = None
 APPLE_HEALTH_DATA_TYPE = "apple-health-data"
 COMPETITION_CONTAINER_SETTING = "COSMOS_COMPETITION_CONTAINER"
 DEFAULT_COMPETITION_CONTAINER = "fitness_competitions"
+DEFAULT_CHALLENGE_RULES = {
+    "description": "Each participant is scored from complete daily health data. Higher scores rank better; the lowest score loses the relevant period.",
+    "scoring": [
+        "Daily score is built from active energy, exercise minutes, and stand hours synced from Apple Health.",
+        "Weekly score is the sum of eligible daily scores in the challenge week.",
+        "Monthly score is the sum of eligible daily scores in the calendar month.",
+        "Final score is the sum of all eligible daily scores across the challenge.",
+        "Leaderboard generation is handled by the scoring job; this API exposes the published results.",
+    ],
+    "tieBreaker": "Highest active energy wins ties.",
+    "healthDataWindow": "Complete local calendar days only.",
+    "sections": [
+        {
+            "title": "Daily inputs",
+            "points": [
+                "Active energy is measured in kcal.",
+                "Exercise is measured in Apple exercise minutes.",
+                "Standing is measured as stand hours.",
+                "Only complete local calendar days are used.",
+            ],
+        },
+        {
+            "title": "Eligibility and minimum data",
+            "points": [
+                "A day is eligible when the scoring job has enough synced data to calculate active energy, exercise minutes, and stand hours.",
+                "If a required metric is missing, the scoring job may treat that metric as zero for that day.",
+                "If too many required daily data points are missing in a period, the scoring job may cap or penalise that period score.",
+                "Manual missing-date upload should be used to fill gaps before a leaderboard is generated.",
+            ],
+        },
+        {
+            "title": "Caps and safeguards",
+            "points": [
+                "Daily metric caps may be applied by the scoring job to avoid one unusual day dominating a week or month.",
+                "Caps and penalties are versioned by scoringVersion.",
+                "The current challenge uses scoringVersion v1 unless the challenge document says otherwise.",
+            ],
+        },
+        {
+            "title": "Leaderboards",
+            "points": [
+                "The Scores tab shows the latest running tally and previous weekly, monthly, and final leaderboards.",
+                "Weekly loser is based on the lowest weekly score.",
+                "Monthly loser is based on the lowest monthly total score.",
+                "Championship loser is based on the lowest total score across the full challenge.",
+            ],
+        },
+    ],
+    "minimumData": {
+        "requiredDailyMetrics": [
+            "active_energy_kcal",
+            "exercise_minutes",
+            "stand_hours",
+        ],
+        "missingMetricTreatment": "Missing required metrics may be scored as zero by the scoring job.",
+        "missingDayTreatment": "Missing days remain missing until uploaded; they may reduce or cap a period score.",
+    },
+    "caps": {
+        "description": "Exact caps are applied by the scoring job and may change by scoringVersion.",
+        "activeEnergy": "May be capped per day.",
+        "exerciseMinutes": "May be capped per day.",
+        "standHours": "Apple stand hours naturally cap at the daily maximum available from Apple Health.",
+    },
+}
 COSMOS_SYSTEM_FIELDS = {
     "_rid",
     "_self",
@@ -477,6 +542,7 @@ class ChallengeCreate(BaseModel):
     timezone: str = "Europe/London"
     weekStartsOn: Literal["SUNDAY", "MONDAY"] = "SUNDAY"
     participants: list[str] = Field(default_factory=list)
+    rules: dict[str, Any] = Field(default_factory=lambda: dict(DEFAULT_CHALLENGE_RULES))
     forfeits: dict[str, Any] = Field(default_factory=dict)
     scoringVersion: str = "v1"
 
@@ -513,6 +579,7 @@ class ChallengePatch(BaseModel):
     timezone: str | None = None
     weekStartsOn: Literal["SUNDAY", "MONDAY"] | None = None
     participants: list[str] | None = None
+    rules: dict[str, Any] | None = None
     forfeits: dict[str, Any] | None = None
     scoringVersion: str | None = None
 
@@ -614,8 +681,22 @@ def _get_participant_document(challenge_id: str, user_id: str) -> dict[str, Any]
     )
 
 
+def _normalise_challenge_rules(rules: Any) -> dict[str, Any]:
+    if not isinstance(rules, dict):
+        return deepcopy(DEFAULT_CHALLENGE_RULES)
+
+    normalised = {
+        **deepcopy(DEFAULT_CHALLENGE_RULES),
+        **rules,
+    }
+    if not isinstance(normalised.get("scoring"), list) or not normalised["scoring"]:
+        normalised["scoring"] = list(DEFAULT_CHALLENGE_RULES["scoring"])
+    return normalised
+
+
 def _enrich_challenge(document: dict[str, Any]) -> dict[str, Any]:
     challenge = _strip_cosmos_fields(document)
+    challenge["rules"] = _normalise_challenge_rules(challenge.get("rules"))
     if "forfeits" in challenge and "forfeitDetails" not in challenge:
         challenge["forfeitDetails"] = challenge["forfeits"]
     user_ids = challenge.get("participants", [])
@@ -900,6 +981,7 @@ def challenge_settings(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response(
             {
                 "challengeID": challenge["challengeID"],
+                "rules": _normalise_challenge_rules(challenge.get("rules")),
                 "forfeits": challenge.get("forfeits", {}),
                 "forfeitDetails": challenge.get("forfeits", {}),
                 "scoringVersion": challenge.get("scoringVersion"),
@@ -1013,20 +1095,32 @@ def remove_participant(req: func.HttpRequest) -> func.HttpResponse:
         return _handle_competition_error(exc)
 
 
-def _leaderboard_query(challenge_id: str, kind: str, latest: bool) -> list[dict[str, Any]]:
-    if kind not in {"week", "month", "final"}:
-        raise ApiError(400, "kind must be week, month, or final")
+def _leaderboard_query(
+    challenge_id: str, kind: str | None = None, latest: bool = False
+) -> list[dict[str, Any]]:
+    allowed_kinds = {"week", "month", "final", "current"}
+    if kind is not None and kind not in allowed_kinds:
+        raise ApiError(400, "kind must be week, month, final, or current")
+
+    parameters = [
+        {"name": "@type", "value": "leaderboard"},
+        {"name": "@challengeID", "value": challenge_id},
+    ]
+    kind_filter = ""
+    if kind is not None:
+        kind_filter = "AND c.kind = @kind"
+        parameters.append({"name": "@kind", "value": kind})
+
     items = _query_items(
-        """
+        f"""
         SELECT * FROM c
-        WHERE c.type = @type AND c.challengeID = @challengeID AND c.kind = @kind
+        WHERE c.type = @type AND c.challengeID = @challengeID
+        {kind_filter}
         """,
-        [
-            {"name": "@type", "value": "leaderboard"},
-            {"name": "@challengeID", "value": challenge_id},
-            {"name": "@kind", "value": kind},
-        ],
+        parameters,
     )
+    if kind is None:
+        items = [item for item in items if item.get("kind") in {"week", "month", "final"}]
     items.sort(key=lambda item: item.get("generatedAt") or item.get("publishedAt") or "", reverse=True)
     if latest:
         return items[:1]
@@ -1035,9 +1129,26 @@ def _leaderboard_query(challenge_id: str, kind: str, latest: bool) -> list[dict[
 
 def _strip_leaderboard(document: dict[str, Any]) -> dict[str, Any]:
     leaderboard = _strip_cosmos_fields(document)
+    if "leaderboardID" not in leaderboard and "id" in leaderboard:
+        leaderboard["leaderboardID"] = leaderboard["id"]
     if "generatedAt" not in leaderboard and "publishedAt" in leaderboard:
         leaderboard["generatedAt"] = leaderboard["publishedAt"]
+    if "rows" not in leaderboard and "entries" in leaderboard:
+        leaderboard["rows"] = leaderboard["entries"]
+    if "rows" not in leaderboard:
+        leaderboard["rows"] = []
     return leaderboard
+
+
+def _empty_leaderboard(challenge_id: str, kind: str) -> dict[str, Any]:
+    return {
+        "leaderboardID": f"empty_{challenge_id}_{kind}",
+        "challengeID": challenge_id,
+        "kind": "current" if kind == "week" else kind,
+        "periodLabel": "Running tally" if kind == "week" else kind.title(),
+        "generatedAt": _utc_now(),
+        "rows": [],
+    }
 
 
 @app.route(route="challenges/{challenge_id}/leaderboards/latest", methods=["GET"])
@@ -1048,7 +1159,7 @@ def latest_leaderboard(req: func.HttpRequest) -> func.HttpResponse:
         kind = req.params.get("kind", "week")
         items = _leaderboard_query(challenge_id, kind, latest=True)
         if not items:
-            raise ApiError(404, "Leaderboard not found")
+            return _json_response(_empty_leaderboard(challenge_id, kind))
         return _json_response(_strip_leaderboard(items[0]))
     except Exception as exc:
         return _handle_competition_error(exc)
@@ -1059,7 +1170,7 @@ def list_leaderboards(req: func.HttpRequest) -> func.HttpResponse:
     try:
         _check_bearer_token(req)
         challenge_id = _route_param(req, "challenge_id")
-        kind = req.params.get("kind", "week")
+        kind = req.params.get("kind")
         return _json_response(
             {
                 "leaderboards": [
