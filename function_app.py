@@ -458,6 +458,12 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
     start_date = _parse_local_date(req.params.get("startDate"), "startDate")
     end_date = _parse_local_date(req.params.get("endDate"), "endDate")
     requested_dates = _date_range(start_date, end_date)
+    include_today = req.params.get("includeToday", "true").lower() not in {"false", "0", "no"}
+    today_date = (
+        _parse_local_date(req.params.get("todayDate"), "todayDate")
+        if req.params.get("todayDate")
+        else datetime.now(timezone.utc).date().isoformat()
+    )
 
     query = """
         SELECT c.date
@@ -484,13 +490,18 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
         )
         if isinstance(item.get("date"), str)
     }
-    missing_dates = [date for date in requested_dates if date not in existing_dates]
+    missing_dates = [
+        date
+        for date in requested_dates
+        if date not in existing_dates or (include_today and date == today_date)
+    ]
 
     logging.info(
-        "Checked missing health export dates user_id=%s startDate=%s endDate=%s missing=%d",
+        "Checked missing health export dates user_id=%s startDate=%s endDate=%s includeToday=%s missing=%d",
         user_id,
         start_date,
         end_date,
+        include_today,
         len(missing_dates),
     )
 

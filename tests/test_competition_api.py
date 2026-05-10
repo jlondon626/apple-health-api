@@ -872,3 +872,118 @@ def test_health_export_upserts_stable_ids_and_missing_dates(monkeypatch):
 
     assert missing_response.status_code == 200
     assert response_json(missing_response)["missingDates"] == ["2026-05-02", "2026-05-03"]
+
+
+def test_health_export_upserts_same_day_updates(monkeypatch):
+    container = FakeHealthContainer()
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    first_response = app.health_export(
+        request(
+            "POST",
+            "/api/health-export",
+            [
+                {
+                    "type": "apple-health-data",
+                    "user_id": "Jack",
+                    "date": "2026-05-10",
+                    "active_energy_kcal": 250,
+                    "exercise_minutes": 20,
+                    "stand_hours": 6,
+                }
+            ],
+        )
+    )
+    second_response = app.health_export(
+        request(
+            "POST",
+            "/api/health-export",
+            [
+                {
+                    "type": "apple-health-data",
+                    "user_id": "Jack",
+                    "date": "2026-05-10",
+                    "active_energy_kcal": 610,
+                    "exercise_minutes": 55,
+                    "stand_hours": 11,
+                }
+            ],
+        )
+    )
+
+    document_id = "apple-health-data::Jack::2026-05-10"
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert response_json(second_response)["ids"] == [document_id]
+    assert list(container.items) == [document_id]
+    assert container.items[document_id]["active_energy_kcal"] == 610
+    assert container.items[document_id]["exercise_minutes"] == 55
+    assert container.items[document_id]["stand_hours"] == 11
+
+
+def test_missing_dates_includes_today_even_when_existing(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-10",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-10",
+            }
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-09",
+                "endDate": "2026-05-10",
+                "todayDate": "2026-05-10",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == ["2026-05-09", "2026-05-10"]
+
+
+def test_missing_dates_can_disable_today_refresh(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-10",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-10",
+            }
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-10",
+                "endDate": "2026-05-10",
+                "todayDate": "2026-05-10",
+                "includeToday": "false",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == []
