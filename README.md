@@ -48,9 +48,13 @@ Successful response:
 
 `GET /api/health-export?action=missing-dates&user_id=Jack&startDate=2026-01-01&endDate=2026-05-02`
 
-This checks Cosmos DB for existing daily rows for the requested user and returns the local dates that are not present. `startDate` and `endDate` are inclusive.
+This checks Cosmos DB for existing daily rows for the requested user and returns the local dates that are not present. `startDate` and `endDate` are inclusive. By default, the endpoint also returns the most recent 7 local dates within the requested range, even if rows already exist, so the app can refresh partial Apple Health data. To change that rolling refresh window, pass `refreshRecentDays=0..31`; `refreshRecentDays=0` disables it.
+
+Existing Apple Health rows where `active_energy_kcal`, `exercise_minutes`, and `stand_hours` are all zero or absent are also returned by default, because those rows are usually incomplete failed/early exports and should be refreshed. To disable that behaviour, pass `refreshZeroDays=false`.
 
 If the requested range includes today, today is returned by default even when a row already exists. This lets the app refresh today's incomplete in-progress Apple Health data later in the day. To disable that behaviour, pass `includeToday=false`. The app may also pass `todayDate=YYYY-MM-DD` if it wants the backend to use the phone's local calendar date rather than the server's UTC date.
+
+For a deliberate backfill, pass `refreshExisting=true`; this returns every date in the requested range so the app can resend and upsert historic Apple Health rows.
 
 Successful response:
 
@@ -341,7 +345,41 @@ Participant endpoints:
 - `GET /api/challenges/{challenge_id}/leaderboard-messages?kind=week`
 - `GET /api/leaderboard-messages/{ai_message_id}`
 - `GET /api/challenges/{challenge_id}/leaderboards/{leaderboard_id}/message`
+- `GET /api/challenges/{challenge_id}/stats?period=week`
 - `GET /api/challenges/{challenge_id}/scores?userID=Jack`
+
+### Stats
+
+`GET /api/challenges/{challenge_id}/stats?period=week|month|challenge`
+
+Returns one stable shape for the app Stats tab:
+
+```json
+{
+  "period": "week",
+  "participants": ["Ash", "Jack"],
+  "weightChangePct": [
+    { "label": "Sun", "Ash": 0, "Jack": 0 },
+    { "label": "Mon", "Ash": -0.2, "Jack": 0.1 }
+  ],
+  "calorieAdherence": [
+    { "label": "Sun", "Ash": 180, "Jack": -90 }
+  ],
+  "foodLoggingDays": {
+    "Ash": 5,
+    "Jack": 3
+  },
+  "activeCalories": [
+    { "label": "Sun", "Ash": 420, "Jack": 510 }
+  ],
+  "weighInDays": {
+    "Ash": 5,
+    "Jack": 4
+  }
+}
+```
+
+`period=week` returns daily points for the current Sunday-starting challenge week. `period=month` and `period=challenge` return weekly buckets labelled `W1`, `W2`, etc. The endpoint reads participant IDs from the challenge document, user calorie targets from user profiles, and source rows from the raw fitness container. Missing participant values are returned as `0`. The optional `todayDate=YYYY-MM-DD` query can be supplied by the app to align the period with the phone's local calendar date.
 
 Latest leaderboard `kind` may be `week`, `month`, `final`, or `current`. If no latest leaderboard exists, the API returns `200` with an empty `rows` array. The app uses `kind=week` as its running tally request, and an empty response has `kind: "current"` and `periodLabel: "Running tally"`.
 

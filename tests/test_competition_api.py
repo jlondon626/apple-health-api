@@ -79,6 +79,12 @@ class FakeHealthContainer:
                 for row in rows
                 if row.get("user_id") == params["@userID"] or row.get("userID") == params["@userID"]
             ]
+        if "@userIDs" in params:
+            rows = [
+                row
+                for row in rows
+                if row.get("user_id") in params["@userIDs"] or row.get("userID") in params["@userIDs"]
+            ]
         if "@type" in params:
             rows = [row for row in rows if row.get("type") == params["@type"]]
         if "@startDate" in params:
@@ -871,7 +877,7 @@ def test_health_export_upserts_stable_ids_and_missing_dates(monkeypatch):
     )
 
     assert missing_response.status_code == 200
-    assert response_json(missing_response)["missingDates"] == ["2026-05-02", "2026-05-03"]
+    assert response_json(missing_response)["missingDates"] == ["2026-05-01", "2026-05-02", "2026-05-03"]
 
 
 def test_health_export_upserts_same_day_updates(monkeypatch):
@@ -981,9 +987,409 @@ def test_missing_dates_can_disable_today_refresh(monkeypatch):
                 "endDate": "2026-05-10",
                 "todayDate": "2026-05-10",
                 "includeToday": "false",
+                "refreshZeroDays": "false",
+                "refreshRecentDays": "0",
             },
         )
     )
 
     assert response.status_code == 200
     assert response_json(response)["missingDates"] == []
+
+
+def test_missing_dates_includes_historic_zero_rows_for_refresh(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-01",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-01",
+                "active_energy_kcal": 0,
+                "exercise_minutes": 0,
+                "stand_hours": 0,
+            },
+            {
+                "id": "apple-health-data::Jack::2026-05-02",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-02",
+                "active_energy_kcal": 100,
+                "exercise_minutes": 0,
+                "stand_hours": 0,
+            },
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-01",
+                "endDate": "2026-05-03",
+                "todayDate": "2026-05-10",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == ["2026-05-01", "2026-05-03"]
+
+
+def test_missing_dates_can_disable_zero_row_refresh(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-01",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-01",
+                "active_energy_kcal": 0,
+                "exercise_minutes": 0,
+                "stand_hours": 0,
+            }
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-01",
+                "endDate": "2026-05-01",
+                "refreshZeroDays": "false",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == []
+
+
+def test_missing_dates_can_force_refresh_existing_historic_rows(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-01",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-01",
+                "active_energy_kcal": 100,
+                "exercise_minutes": 10,
+                "stand_hours": 8,
+            }
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-01",
+                "endDate": "2026-05-02",
+                "refreshExisting": "true",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == ["2026-05-01", "2026-05-02"]
+
+
+def test_missing_dates_refreshes_last_seven_days_even_with_non_zero_rows(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-07",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-07",
+                "active_energy_kcal": 10,
+                "exercise_minutes": 1,
+                "stand_hours": 1,
+            },
+            {
+                "id": "apple-health-data::Jack::2026-05-10",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-10",
+                "active_energy_kcal": 500,
+                "exercise_minutes": 45,
+                "stand_hours": 10,
+            },
+            {
+                "id": "apple-health-data::Jack::2026-05-13",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-13",
+                "active_energy_kcal": 200,
+                "exercise_minutes": 20,
+                "stand_hours": 6,
+            },
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-07",
+                "endDate": "2026-05-13",
+                "todayDate": "2026-05-13",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == [
+        "2026-05-07",
+        "2026-05-08",
+        "2026-05-09",
+        "2026-05-10",
+        "2026-05-11",
+        "2026-05-12",
+        "2026-05-13",
+    ]
+
+
+def test_missing_dates_refresh_recent_days_can_be_disabled(monkeypatch):
+    container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Jack::2026-05-13",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-13",
+                "active_energy_kcal": 200,
+                "exercise_minutes": 20,
+                "stand_hours": 6,
+            }
+        ]
+    )
+    monkeypatch.setattr(app, "_container", container)
+    monkeypatch.delenv("HEALTH_API_TOKEN", raising=False)
+
+    response = app.health_export(
+        request(
+            "GET",
+            "/api/health-export",
+            params={
+                "action": "missing-dates",
+                "user_id": "Jack",
+                "startDate": "2026-05-13",
+                "endDate": "2026-05-13",
+                "todayDate": "2026-05-13",
+                "includeToday": "false",
+                "refreshRecentDays": "0",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["missingDates"] == []
+
+
+def test_challenge_stats_week_shape(fake_container, monkeypatch):
+    raw_container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Ash::2026-05-10",
+                "type": "apple-health-data",
+                "user_id": "Ash",
+                "userID": "Ash",
+                "date": "2026-05-10",
+                "active_energy_kcal": 420,
+            },
+            {
+                "id": "apple-health-data::Jack::2026-05-10",
+                "type": "apple-health-data",
+                "user_id": "Jack",
+                "userID": "Jack",
+                "date": "2026-05-10",
+                "active_energy_kcal": 510,
+            },
+            {
+                "id": "apple-health-data::Ash::2026-05-11",
+                "type": "apple-health-data",
+                "user_id": "Ash",
+                "userID": "Ash",
+                "date": "2026-05-11",
+                "active_energy_kcal": 610,
+            },
+            {
+                "id": "food::Ash::2026-05-10",
+                "type": "fatsecret-day",
+                "userID": "Ash",
+                "date": "2026-05-10",
+                "calories": 2480,
+            },
+            {
+                "id": "food::Jack::2026-05-10",
+                "type": "fatsecret-day",
+                "userID": "Jack",
+                "date": "2026-05-10",
+                "calories": 2310,
+            },
+            {
+                "id": "weight::Ash::2026-05-10",
+                "type": "renpho-weight",
+                "userID": "Ash",
+                "date": "2026-05-10",
+                "weightKg": 90,
+            },
+            {
+                "id": "weight::Ash::2026-05-11",
+                "type": "renpho-weight",
+                "userID": "Ash",
+                "date": "2026-05-11",
+                "weightKg": 89.1,
+            },
+            {
+                "id": "weight::Jack::2026-05-10",
+                "type": "renpho-weight",
+                "userID": "Jack",
+                "date": "2026-05-10",
+                "weightKg": 87,
+            },
+        ]
+    )
+    monkeypatch.setattr(app, "_container", raw_container)
+    fake_container.upsert_item(
+        {
+            "id": "user_ash",
+            "type": "user",
+            "userID": "Ash",
+            "displayName": "Ash",
+            "averageDailyCalorieTarget": 2300,
+        }
+    )
+    fake_container.upsert_item(
+        {
+            "id": "user_jack",
+            "type": "user",
+            "userID": "Jack",
+            "displayName": "Jack",
+            "averageDailyCalorieTarget": 2400,
+        }
+    )
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04",
+            "type": "challenge",
+            "challengeID": "challenge_2026_05_04",
+            "name": "League",
+            "status": "active",
+            "startDate": "2026-05-04",
+            "endDate": "2026-06-01",
+            "participants": ["Ash", "Jack"],
+        }
+    )
+
+    response = app.challenge_stats(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/stats",
+            params={"period": "week", "todayDate": "2026-05-12"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert body["period"] == "week"
+    assert body["participants"] == ["Ash", "Jack"]
+    assert body["activeCalories"][0] == {"label": "Sun", "Ash": 420, "Jack": 510}
+    assert body["activeCalories"][1] == {"label": "Mon", "Ash": 610, "Jack": 0}
+    assert body["calorieAdherence"][0] == {"label": "Sun", "Ash": 180, "Jack": -90}
+    assert body["weightChangePct"][1] == {"label": "Mon", "Ash": -1, "Jack": 0}
+    assert body["foodLoggingDays"] == {"Ash": 1, "Jack": 1}
+    assert body["weighInDays"] == {"Ash": 2, "Jack": 1}
+
+
+def test_challenge_stats_month_uses_week_buckets(fake_container, monkeypatch):
+    raw_container = FakeHealthContainer(
+        [
+            {
+                "id": "apple-health-data::Ash::2026-05-10",
+                "type": "apple-health-data",
+                "user_id": "Ash",
+                "userID": "Ash",
+                "date": "2026-05-10",
+                "active_energy_kcal": 420,
+            },
+            {
+                "id": "apple-health-data::Ash::2026-05-17",
+                "type": "apple-health-data",
+                "user_id": "Ash",
+                "userID": "Ash",
+                "date": "2026-05-17",
+                "active_energy_kcal": 500,
+            },
+        ]
+    )
+    monkeypatch.setattr(app, "_container", raw_container)
+    fake_container.upsert_item(
+        {
+            "id": "user_ash",
+            "type": "user",
+            "userID": "Ash",
+            "displayName": "Ash",
+            "averageDailyCalorieTarget": 2300,
+        }
+    )
+    fake_container.upsert_item(
+        {
+            "id": "challenge_2026_05_04",
+            "type": "challenge",
+            "challengeID": "challenge_2026_05_04",
+            "name": "League",
+            "status": "active",
+            "startDate": "2026-05-04",
+            "endDate": "2026-06-01",
+            "participants": ["Ash"],
+        }
+    )
+
+    response = app.challenge_stats(
+        request(
+            "GET",
+            "/api/challenges/challenge_2026_05_04/stats",
+            params={"period": "month", "todayDate": "2026-05-20"},
+            route_params={"challenge_id": "challenge_2026_05_04"},
+        )
+    )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert body["period"] == "month"
+    assert [item["label"] for item in body["activeCalories"]] == ["W1", "W2", "W3"]
+    assert body["activeCalories"][0]["Ash"] == 420
+    assert body["activeCalories"][1]["Ash"] == 500

@@ -446,6 +446,25 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
     return [(start + timedelta(days=offset)).isoformat() for offset in range(days + 1)]
 
 
+def _date_label(value: str) -> str:
+    return datetime.strptime(value, "%Y-%m-%d").strftime("%a")
+
+
+def _to_date(value: str):
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _is_zero_or_missing_health_row(row: dict[str, Any]) -> bool:
+    metric_names = ("active_energy_kcal", "exercise_minutes", "stand_hours")
+    for metric_name in metric_names:
+        value = row.get(metric_name)
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, (int, float)) and value > 0:
+            return False
+    return True
+
+
 def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
     action = req.params.get("action")
     if action != "missing-dates":
@@ -459,14 +478,27 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
     end_date = _parse_local_date(req.params.get("endDate"), "endDate")
     requested_dates = _date_range(start_date, end_date)
     include_today = req.params.get("includeToday", "true").lower() not in {"false", "0", "no"}
+    refresh_zero_days = req.params.get("refreshZeroDays", "true").lower() not in {"false", "0", "no"}
+    refresh_existing = req.params.get("refreshExisting", "false").lower() in {"true", "1", "yes"}
+    try:
+        refresh_recent_days = int(req.params.get("refreshRecentDays", "7"))
+    except ValueError as exc:
+        raise ApiError(400, "refreshRecentDays must be a number") from exc
+    if refresh_recent_days < 0 or refresh_recent_days > 31:
+        raise ApiError(400, "refreshRecentDays must be between 0 and 31")
     today_date = (
         _parse_local_date(req.params.get("todayDate"), "todayDate")
         if req.params.get("todayDate")
         else datetime.now(timezone.utc).date().isoformat()
     )
+    today = _to_date(today_date)
+    recent_dates = {
+        (today - timedelta(days=offset)).isoformat()
+        for offset in range(refresh_recent_days)
+    }
 
     query = """
-        SELECT c.date
+        SELECT c.date, c.active_energy_kcal, c.exercise_minutes, c.stand_hours
         FROM c
         WHERE (c.user_id = @userID OR c.userID = @userID)
           AND c.type = @type
@@ -481,27 +513,38 @@ def _get_missing_dates(req: func.HttpRequest) -> func.HttpResponse:
     ]
 
     container = _get_container()
-    existing_dates = {
-        item["date"]
+    existing_rows = [
+        item
         for item in container.query_items(
             query=query,
             parameters=parameters,
             partition_key=user_id,
         )
         if isinstance(item.get("date"), str)
+    ]
+    existing_dates = {item["date"] for item in existing_rows}
+    refreshable_dates = {
+        item["date"] for item in existing_rows if refresh_zero_days and _is_zero_or_missing_health_row(item)
     }
     missing_dates = [
         date
         for date in requested_dates
-        if date not in existing_dates or (include_today and date == today_date)
+        if refresh_existing
+        or date not in existing_dates
+        or date in refreshable_dates
+        or date in recent_dates
+        or (include_today and date == today_date)
     ]
 
     logging.info(
-        "Checked missing health export dates user_id=%s startDate=%s endDate=%s includeToday=%s missing=%d",
+        "Checked missing health export dates user_id=%s startDate=%s endDate=%s includeToday=%s refreshZeroDays=%s refreshExisting=%s refreshRecentDays=%d missing=%d",
         user_id,
         start_date,
         end_date,
         include_today,
+        refresh_zero_days,
+        refresh_existing,
+        refresh_recent_days,
         len(missing_dates),
     )
 
@@ -1379,6 +1422,235 @@ def _strip_leaderboard(document: dict[str, Any]) -> dict[str, Any]:
     return leaderboard
 
 
+def _numeric_field(document: dict[str, Any], field_names: tuple[str, ...]) -> float | None:
+    for field_name in field_names:
+        value = document.get(field_name)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _raw_user_id(document: dict[str, Any]) -> str | None:
+    value = document.get("userID") or document.get("user_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _raw_date(document: dict[str, Any]) -> str | None:
+    value = document.get("date") or document.get("localDate")
+    return value if isinstance(value, str) else None
+
+
+def _stats_period_bounds(challenge: dict[str, Any], period: str, today_date: str) -> tuple[str, str]:
+    challenge_start = _to_date(challenge["startDate"])
+    challenge_end = _to_date(challenge["endDate"])
+    today = _to_date(today_date)
+    effective_end = challenge_end if challenge.get("status") == "completed" else min(today, challenge_end)
+
+    if period == "challenge":
+        start = challenge_start
+        end = effective_end
+    elif period == "month":
+        month_start = today.replace(day=1)
+        start = max(challenge_start, month_start)
+        end = effective_end
+    elif period == "week":
+        days_since_sunday = (today.weekday() + 1) % 7
+        week_start = today - timedelta(days=days_since_sunday)
+        start = max(challenge_start, week_start)
+        end = effective_end
+    else:
+        raise ApiError(400, "period must be week, month, or challenge")
+
+    if end < start:
+        end = start
+    return start.isoformat(), end.isoformat()
+
+
+def _stats_buckets(start_date: str, end_date: str, period: str) -> list[dict[str, str]]:
+    dates = _date_range(start_date, end_date)
+    if period == "week":
+        return [{"label": _date_label(date), "start": date, "end": date} for date in dates]
+
+    buckets = []
+    start = _to_date(start_date)
+    end = _to_date(end_date)
+    cursor = start
+    index = 1
+    while cursor <= end:
+        bucket_end = min(cursor + timedelta(days=6), end)
+        buckets.append(
+            {
+                "label": f"W{index}",
+                "start": cursor.isoformat(),
+                "end": bucket_end.isoformat(),
+            }
+        )
+        cursor = bucket_end + timedelta(days=1)
+        index += 1
+    return buckets
+
+
+def _query_raw_stats_rows(user_ids: list[str], start_date: str, end_date: str) -> list[dict[str, Any]]:
+    if not user_ids:
+        return []
+    return list(
+        _get_container().query_items(
+            query="""
+            SELECT * FROM c
+            WHERE (ARRAY_CONTAINS(@userIDs, c.userID) OR ARRAY_CONTAINS(@userIDs, c.user_id))
+              AND c.date >= @startDate
+              AND c.date <= @endDate
+            """,
+            parameters=[
+                {"name": "@userIDs", "value": user_ids},
+                {"name": "@startDate", "value": start_date},
+                {"name": "@endDate", "value": end_date},
+            ],
+            enable_cross_partition_query=True,
+        )
+    )
+
+
+def _participant_profiles(user_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not user_ids:
+        return {}
+    profiles = _query_items(
+        "SELECT * FROM c WHERE c.type = @type AND ARRAY_CONTAINS(@userIDs, c.userID)",
+        [{"name": "@type", "value": "user"}, {"name": "@userIDs", "value": user_ids}],
+    )
+    return {profile["userID"]: _strip_user_document(profile) for profile in profiles}
+
+
+def _stats_value_row(label: str, participants: list[str]) -> dict[str, Any]:
+    return {"label": label, **{participant: 0 for participant in participants}}
+
+
+def _average(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0
+
+
+def _round_stat(value: float) -> int | float:
+    rounded = round(value, 2)
+    return int(rounded) if rounded == int(rounded) else rounded
+
+
+def _build_stats_response(challenge: dict[str, Any], period: str, today_date: str) -> dict[str, Any]:
+    user_ids = [item for item in challenge.get("participants", []) if isinstance(item, str)]
+    profiles = _participant_profiles(user_ids)
+    display_by_user = {
+        user_id: profiles.get(user_id, {}).get("displayName") or user_id for user_id in user_ids
+    }
+    participants = [display_by_user[user_id] for user_id in user_ids]
+    calorie_targets = {
+        user_id: profiles.get(user_id, {}).get("averageDailyCalorieTarget") or 0 for user_id in user_ids
+    }
+    start_date, end_date = _stats_period_bounds(challenge, period, today_date)
+    buckets = _stats_buckets(start_date, end_date, period)
+    raw_rows = _query_raw_stats_rows(user_ids, start_date, end_date)
+
+    by_user_date: dict[str, dict[str, dict[str, Any]]] = {
+        user_id: {date: {"active": 0.0, "calories": [], "weights": []} for date in _date_range(start_date, end_date)}
+        for user_id in user_ids
+    }
+
+    for row in raw_rows:
+        user_id = _raw_user_id(row)
+        date = _raw_date(row)
+        if user_id not in by_user_date or date not in by_user_date[user_id]:
+            continue
+        active = _numeric_field(
+            row,
+            (
+                "active_energy_kcal",
+                "activeEnergyKcal",
+                "activeCalories",
+                "active_calories",
+                "active_kcal",
+            ),
+        )
+        calories = _numeric_field(
+            row,
+            (
+                "calories",
+                "caloriesKcal",
+                "calorie_kcal",
+                "foodCaloriesKcal",
+                "totalCalories",
+                "consumedCalories",
+            ),
+        )
+        weight = _numeric_field(
+            row,
+            ("weightKg", "weight_kg", "bodyWeightKg", "body_weight_kg", "weight"),
+        )
+        if active is not None:
+            by_user_date[user_id][date]["active"] += active
+        if calories is not None:
+            by_user_date[user_id][date]["calories"].append(calories)
+        if weight is not None:
+            by_user_date[user_id][date]["weights"].append(weight)
+
+    weight_change = []
+    calorie_adherence = []
+    active_calories = []
+    food_logging_days = {display_by_user[user_id]: 0 for user_id in user_ids}
+    weigh_in_days = {display_by_user[user_id]: 0 for user_id in user_ids}
+
+    first_weights: dict[str, float | None] = {}
+    for user_id in user_ids:
+        first_weights[user_id] = None
+        for date in _date_range(start_date, end_date):
+            weights = by_user_date[user_id][date]["weights"]
+            if weights:
+                first_weights[user_id] = weights[-1]
+                break
+
+    for bucket in buckets:
+        weight_row = _stats_value_row(bucket["label"], participants)
+        calorie_row = _stats_value_row(bucket["label"], participants)
+        active_row = _stats_value_row(bucket["label"], participants)
+        bucket_dates = _date_range(bucket["start"], bucket["end"])
+
+        for user_id in user_ids:
+            display_name = display_by_user[user_id]
+            bucket_active = 0.0
+            calorie_variances = []
+            latest_weight = None
+            for date in bucket_dates:
+                day = by_user_date[user_id][date]
+                bucket_active += day["active"]
+                if day["calories"]:
+                    calories = sum(day["calories"])
+                    target = calorie_targets[user_id]
+                    calorie_variances.append(calories - target if target else 0)
+                    food_logging_days[display_name] += 1
+                if day["weights"]:
+                    latest_weight = day["weights"][-1]
+                    weigh_in_days[display_name] += 1
+
+            baseline = first_weights[user_id]
+            if baseline and latest_weight:
+                weight_row[display_name] = _round_stat(((latest_weight - baseline) / baseline) * 100)
+            calorie_row[display_name] = _round_stat(_average(calorie_variances))
+            active_row[display_name] = _round_stat(bucket_active)
+
+        weight_change.append(weight_row)
+        calorie_adherence.append(calorie_row)
+        active_calories.append(active_row)
+
+    return {
+        "period": period,
+        "participants": participants,
+        "weightChangePct": weight_change,
+        "calorieAdherence": calorie_adherence,
+        "foodLoggingDays": food_logging_days,
+        "activeCalories": active_calories,
+        "weighInDays": weigh_in_days,
+    }
+
+
 def _empty_leaderboard(challenge_id: str, kind: str) -> dict[str, Any]:
     return {
         "leaderboardID": f"empty_{challenge_id}_{kind}",
@@ -1490,6 +1762,27 @@ def list_scores(req: func.HttpRequest) -> func.HttpResponse:
                 {"name": "@challengeID", "value": challenge_id},
             ]
         return _json_response({"scores": [_strip_cosmos_fields(item) for item in _query_items(query, parameters)]})
+    except Exception as exc:
+        return _handle_competition_error(exc)
+
+
+@app.route(route="challenges/{challenge_id}/stats", methods=["GET"])
+def challenge_stats(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        _check_bearer_token(req)
+        challenge_id = _route_param(req, "challenge_id")
+        period = req.params.get("period", "week")
+        if period not in {"week", "month", "challenge"}:
+            raise ApiError(400, "period must be week, month, or challenge")
+        today_date = (
+            _parse_local_date(req.params.get("todayDate"), "todayDate")
+            if req.params.get("todayDate")
+            else datetime.now(timezone.utc).date().isoformat()
+        )
+        challenge = _get_challenge_document(challenge_id)
+        if not challenge:
+            raise ApiError(404, "Challenge not found")
+        return _json_response(_build_stats_response(challenge, period, today_date))
     except Exception as exc:
         return _handle_competition_error(exc)
 
